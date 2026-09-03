@@ -15,11 +15,27 @@ echo "BC-250 dual-output AC3 installer"
 echo "Backup: $BACKUP"
 
 WP_VERSION=$(wireplumber --version 2>/dev/null | grep -Eo '0\.5\.[0-9]+' | head -1 || true)
-if [[ "$WP_VERSION" != "0.5.16" && "${BC250_ALLOW_UNTESTED_WP:-0}" != "1" ]]; then
-  echo "ERROR: this ALSA-monitor guard is built/tested against WirePlumber 0.5.16." >&2
+EXPECTED_WP_VERSION="0.5.17"
+EXPECTED_STOCK_ALSA_SHA256="b0f15addcd2b36a8a5cd87555b9cbd822de1b8663545e5add2faf3d2f4c50211"
+STOCK_ALSA="/usr/share/wireplumber/scripts/monitors/alsa.lua"
+
+if [[ "$WP_VERSION" != "$EXPECTED_WP_VERSION" && "${BC250_ALLOW_UNTESTED_WP:-0}" != "1" ]]; then
+  echo "ERROR: this package is currently rebased and tested for WirePlumber $EXPECTED_WP_VERSION." >&2
   echo "Detected: ${WP_VERSION:-unknown}" >&2
   echo "Set BC250_ALLOW_UNTESTED_WP=1 only if you intentionally want to test another version." >&2
   exit 2
+fi
+
+if [[ -f "$STOCK_ALSA" && "${BC250_ALLOW_UNTESTED_WP:-0}" != "1" ]]; then
+  STOCK_ALSA_SHA256=$(sha256sum "$STOCK_ALSA" | awk '{print $1}')
+  if [[ "$STOCK_ALSA_SHA256" != "$EXPECTED_STOCK_ALSA_SHA256" ]]; then
+    echo "ERROR: distro stock alsa.lua does not match the WirePlumber 0.5.17 base used by v0.7." >&2
+    echo "Expected: $EXPECTED_STOCK_ALSA_SHA256" >&2
+    echo "Found:    $STOCK_ALSA_SHA256" >&2
+    echo "Refusing to install a full monitor override onto an unknown base." >&2
+    echo "Set BC250_ALLOW_UNTESTED_WP=1 only for deliberate testing." >&2
+    exit 3
+  fi
 fi
 
 backup_user_file() {

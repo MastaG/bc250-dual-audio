@@ -5,6 +5,11 @@
 --
 -- SPDX-License-Identifier: MIT
 
+-- BC-250 downstream monitor guard v0.7
+-- Rebased on the stock WirePlumber 0.5.17 monitors/alsa.lua.
+-- The original file remains installed under /usr/share; this override adds only
+-- BC-250 HDMI teardown/activation serialization and the AC3 hardware lock.
+
 SPLIT_PCM_PARENT_OFFSET = 256
 SPLIT_PCM_OFFSET = 512
 

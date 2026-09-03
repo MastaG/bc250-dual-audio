@@ -20,7 +20,7 @@ pactl list cards | grep -E 'Name: alsa_card.pci-0000_01_00.1|Active Profile' || 
 echo
 echo '=== BC-250 policy log ==='
 journalctl --user -u wireplumber --since '10 minutes ago' --no-pager | \
-  grep -E 's-bc250-audio|BC-250|A52|AC3|busy|EBUSY|playback open failed|Start error|stack traceback' || true
+  grep -E 's-bc250-audio|BC-250|A52|AC3|sink-monitor|Holding native|reprobe|busy|EBUSY|playback open failed|Start error|stack traceback' || true
 
 echo
 echo '=== PipeWire EBUSY/errors ==='
@@ -37,3 +37,9 @@ echo
 echo '=== configured vs effective default sink metadata ==='
 pw-metadata -n default 0 2>/dev/null | \
   grep -E 'default\.configured\.audio\.sink|default\.audio\.sink' || true
+
+
+echo
+echo '=== ALSA monitor base / override hashes ==='
+sha256sum /usr/share/wireplumber/scripts/monitors/alsa.lua 2>/dev/null || true
+sha256sum /usr/local/share/wireplumber/scripts/monitors/alsa.lua 2>/dev/null || true

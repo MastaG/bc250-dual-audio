@@ -1,4 +1,29 @@
-# BC-250 dual-output audio prototype v0.6
+# BC-250 dual-output audio prototype v0.7
+
+## v0.7 WirePlumber 0.5.17 rebase + KDE monitor-stream guard
+
+v0.7 is rebased on the stock `monitors/alsa.lua` supplied with WirePlumber
+**0.5.17**. The package no longer targets 0.5.16. The installer also verifies
+the stock 0.5.17 monitor hash before installing the full downstream override, so
+a future distro change cannot silently run the BC-250 patch on an unknown base.
+
+The functional v0.7 change fixes a race observed in KDE while AC3 was selected.
+KDE / Plasma and tools such as pavucontrol may create sink-monitor capture
+streams (`Stream/Input/Audio` with `stream.capture.sink=true`) for peak / level
+meters. Even though all normal playback had already moved to `bc250_ac3`, a
+monitor stream could remain on the suspended native HDMI sink and wake it. Since
+A52 already owned `hw:Generic,3`, that wake-up produced `EBUSY`, the native node
+entered ERROR, disappeared from the tray, and was then destroyed/recreated.
+
+v0.7 extends the existing global `select-target` policy so sink-monitor capture
+streams follow the same global output as playback streams. In AC3 mode, KDE may
+monitor `bc250_ac3`, but it cannot wake the physical native HDMI sink. Native HDMI
+therefore remains visible and suspended until the user selects it again. Real
+microphone capture is untouched because only capture streams with
+`stream.capture.sink=true` are intercepted.
+
+The v0.6 configured-default authority, v0.5 hardware lock/reprobe/keepalive, and
+1000 ms hardware serialization remain otherwise unchanged.
 
 ## v0.6 configured-default authority
 
@@ -40,7 +65,7 @@ so receivers / soundbars / TVs do not lose Dolby Digital lock between sounds.
 This version fixes daemon-side default-output tracking. WirePlumber daemon scripts cannot use `Core.require_api()`; v0.2 attaches to the already-loaded `default-nodes-api` with `Plugin.find()` and retries until the plugin is available.
 
 
-Target: **CachyOS / WirePlumber 0.5.16 / BC-250**.
+Target: **CachyOS / WirePlumber 0.5.17 / BC-250**.
 
 ## What this builds
 
@@ -82,8 +107,9 @@ BC-250 mode.
 ## Mutual exclusion
 
 The custom `select-target` hook runs before WirePlumber's stock
-`linking/find-defined-target` hook. For normal `Stream/Output/Audio` clients it
-forces the current global BC-250 target. This intentionally prevents a state
+`linking/find-defined-target` hook. For normal `Stream/Output/Audio` clients **and** sink-monitor capture streams
+(`Stream/Input/Audio` + `stream.capture.sink=true`) it forces the current global
+BC-250 target. This intentionally prevents a state
 such as:
 
 - Firefox -> AC3
@@ -103,9 +129,9 @@ Internal bridge streams are marked `bc250.internal=true` and bypass the rule.
 - `/usr/local/share/wireplumber/scripts/90-bc250-audio-mode.lua`
 - `/usr/local/share/wireplumber/scripts/monitors/alsa.lua`
 
-The `monitors/alsa.lua` file is the exact BC-250 guard version that already
-passed the profile-switch torture test in this machine. It is deliberately
-pinned to WirePlumber 0.5.16.
+The `monitors/alsa.lua` override is the BC-250 guard rebased onto the stock
+WirePlumber 0.5.17 file. The installer verifies the known stock base hash before
+installing it.
 
 ## Install
 
@@ -178,6 +204,21 @@ The first v0.6 regression test should therefore verify that a configured native
 selection stays native across unplug/replug (no temporary AC3 mode), followed by
 a configured AC3 unplug/replug test where AC3 remains the desired mode and the
 v0.5 reprobe/reclaim cycle completes. Keep the v0.5 backup until those tests pass.
+
+## v0.7 regression test focus
+
+The first v0.7 test should be KDE native -> AC3 while the Plasma audio UI is
+open. Native HDMI should suspend quickly, AC3 should reach READY, and the native
+sink should remain present rather than entering ERROR / being destroyed. Then
+check:
+
+```bash
+journalctl --user -u pipewire --since "10 minutes ago" --no-pager | \
+  grep -Ei 'busy|EBUSY|playback open failed|Start error'
+```
+
+Expected: no output. A subsequent AC3 -> native switch should still follow the
+existing A52 teardown + 1000 ms guard path.
 
 ## Rollback
 

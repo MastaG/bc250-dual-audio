@@ -1,6 +1,6 @@
 -- BC-250 global native-HDMI / realtime-AC3 output arbiter
--- Target: WirePlumber 0.5.16
--- BC-250 policy revision: v0.6
+-- Target: WirePlumber 0.5.17
+-- BC-250 policy revision: v0.7
 --
 -- User-visible model:
 --   * stock/native HDMI/DP sink (ACP, EDID/ELD driven)
@@ -86,6 +86,10 @@ local timer_source = nil
 
 local function starts_with (s, prefix)
   return s ~= nil and s:sub (1, #prefix) == prefix
+end
+
+local function prop_is_true (v)
+  return v == true or v == "true" or v == "1"
 end
 
 local function set_bool_setting (name, value)
@@ -879,9 +883,17 @@ local function schedule_startup_settle (reason)
   end)
 end
 
--- Enforce GLOBAL output semantics for normal client playback streams.
+-- Enforce GLOBAL output semantics for both normal client playback streams and
+-- sink-monitor capture streams. The latter matters on KDE / pavucontrol: level
+-- meters commonly create Stream/Input/Audio nodes with stream.capture.sink=true.
+-- If such a monitor remains linked to native HDMI while AC3 owns hw:Generic,3,
+-- PipeWire can wake the suspended native ALSA node and hit EBUSY. Redirecting
+-- sink-monitor captures to the current global output keeps native HDMI visible
+-- but dormant while AC3 is active.
+--
 -- This hook intentionally runs before find-defined-target and overwrites any
--- per-application target choice while the selected global mode is native/AC3.
+-- per-application / per-monitor target choice while the selected global mode is
+-- native/AC3. Internal BC-250 bridge streams bypass it.
 SimpleEventHook {
   name = "linking/bc250-global-output",
   before = "linking/find-defined-target",
@@ -898,11 +910,17 @@ SimpleEventHook {
       return
     end
 
-    if si_props["media.class"] ~= "Stream/Output/Audio" then
+    if si_props["bc250.internal"] == "true" then
       return
     end
 
-    if si_props["bc250.internal"] == "true" then
+    local media_class = si_props["media.class"]
+    local is_playback = media_class == "Stream/Output/Audio"
+    local is_sink_monitor_capture =
+        media_class == "Stream/Input/Audio" and
+        prop_is_true (si_props["stream.capture.sink"])
+
+    if not is_playback and not is_sink_monitor_capture then
       return
     end
 
@@ -918,6 +936,10 @@ SimpleEventHook {
     for linkable in om:iterate { type = "SiLinkable" } do
       if linkable.properties["node.name"] == wanted then
         event:set_data ("target", linkable)
+        if is_sink_monitor_capture then
+          log:debug (si, "sink-monitor capture follows global BC-250 output -> " ..
+              tostring (wanted))
+        end
         return
       end
     end
