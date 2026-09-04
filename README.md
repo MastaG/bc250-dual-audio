@@ -1,10 +1,29 @@
-# BC-250 Dual Audio v0.8
+# BC-250 Dual Audio v0.9
 
 Realtime Dolby Digital / Dolby Digital Plus output modes for the AMD BC-250 on
 CachyOS, while keeping the normal HDMI/DisplayPort output completely native and
 EDID/ELD-driven.
 
 Target: **CachyOS / PipeWire 1.6.x / WirePlumber 0.5.17 / AMD BC-250**.
+
+## v0.9
+
+v0.9 is a focused reliability update for the E-AC-3 backend introduced in
+v0.8. It keeps the same native / AC-3 / E-AC-3 architecture and fixes the
+FIFO lifecycle observed during real mode switching.
+
+Changes:
+
+- Re-validates and re-creates `/run/user/$UID/bc250-eac3-768.pcm` before every
+  E-AC-3 backend cycle. PipeWire may unlink this FIFO when its dynamic
+  `pipe-tunnel` module is unloaded.
+- Handles FIFO open/create failures as transient lifecycle races with a bounded
+  retry instead of continuing with an invalid file descriptor.
+- Prevents the previous ENOENT / `Bad file descriptor` tight loop and the
+  resulting unnecessary CPU usage after E-AC-3 -> AC-3/native transitions.
+- Keeps the v0.8 codec names and bitrates unchanged:
+  `bc250_ac3_448` and `bc250_eac3_768`.
+- WirePlumber 0.5.17 remains the tested/rebased target.
 
 ## v0.8
 

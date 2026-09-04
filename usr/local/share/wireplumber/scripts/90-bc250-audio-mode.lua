@@ -1,6 +1,6 @@
 -- BC-250 global native-HDMI / realtime Dolby encoder arbiter
 -- Target: WirePlumber 0.5.17
--- BC-250 policy revision: v0.8
+-- BC-250 policy revision: v0.9
 --
 -- User-visible model:
 --   * stock/native HDMI/DP sink (ACP, EDID/ELD driven)
@@ -49,7 +49,7 @@ local ALSA_START_DELAY = tonumber (cfg["api-alsa-start-delay"] or "1536") or 153
 local STARTUP_SETTLE_MS = tonumber (cfg["startup-settle-ms"] or "1500") or 1500
 local NATIVE_PROBE_TIMEOUT_MS = tonumber (cfg["native-probe-timeout-ms"] or "5000") or 5000
 
--- Historical setting name kept for v0.5-v0.7 compatibility. In v0.8 this is
+-- Historical setting name kept for v0.5-v0.7 compatibility. In v0.8+ this is
 -- the generic encoded-hardware lock for either AC-3 or E-AC-3.
 local ENCODED_LOCK_SETTING = "bc250.audio.ac3-hardware-lock"
 local NATIVE_PROBE_SETTING = "bc250.audio.native-probe-request"

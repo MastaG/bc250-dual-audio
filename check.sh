@@ -51,3 +51,13 @@ journalctl --user -u pipewire --since "10 minutes ago" --no-pager | \
 echo
 echo "=== recent EAC3 helper log ==="
 journalctl --user -u bc250-eac3-backend --since "10 minutes ago" --no-pager | tail -40 || true
+
+echo
+echo "=== EAC3 FIFO lifecycle errors ==="
+EAC3_FIFO_ERRORS=$(journalctl --user -u bc250-eac3-backend --since "10 minutes ago" --no-pager 2>/dev/null | \
+  grep -Ei 'No such file|Bestand of map bestaat niet|Bad file descriptor|Ongeldige bestandsdescriptor|failed to (open|create) FIFO' || true)
+if [[ -n "$EAC3_FIFO_ERRORS" ]]; then
+  echo "$EAC3_FIFO_ERRORS"
+else
+  echo "None."
+fi

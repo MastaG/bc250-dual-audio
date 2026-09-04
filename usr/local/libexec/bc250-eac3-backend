@@ -31,13 +31,27 @@ for cmd in ffmpeg aplay mkfifo dd cat grep tr stat; do
 done
 
 umask 077
-if [[ -e "$FIFO" && ! -p "$FIFO" ]]; then
-    log "removing non-FIFO path: $FIFO"
-    rm -f "$FIFO"
-fi
-if [[ ! -p "$FIFO" ]]; then
-    mkfifo -m 0600 "$FIFO"
-fi
+
+# libpipewire-module-pipe-tunnel may remove the FIFO pathname when the
+# dynamically loaded E-AC-3 backend is unloaded.  An already-open reader FD
+# remains valid until the writer closes, but the next loop iteration must not
+# assume that the pathname still exists.  Re-create/validate it every time
+# before opening a new reader.
+ensure_fifo() {
+    if [[ -e "$FIFO" && ! -p "$FIFO" ]]; then
+        log "removing non-FIFO path: $FIFO"
+        rm -f -- "$FIFO" || return 1
+    fi
+
+    if [[ ! -p "$FIFO" ]]; then
+        if ! mkfifo -m 0600 "$FIFO"; then
+            log "failed to create FIFO: $FIFO"
+            return 1
+        fi
+    fi
+
+    return 0
+}
 
 find_generic_card_dir() {
     local id
@@ -77,10 +91,23 @@ log "ready; waiting for $FIFO"
 while true; do
     rm -f "$PREBUFFER"
 
+    # The pipe-tunnel module is created and destroyed for every E-AC-3 mode
+    # transition and can unlink the FIFO as part of teardown.  Always validate
+    # the pathname again before blocking for the next writer.
+    if ! ensure_fifo; then
+        sleep 1
+        continue
+    fi
+
     # Keep one reader fd open from the first PCM frame until the PipeWire
     # pipe-tunnel writer closes. This avoids a reader-less FIFO gap between
-    # prebuffering and the ffmpeg pipeline.
-    exec 3<"$FIFO"
+    # prebuffering and the ffmpeg pipeline.  Treat an unexpected open failure
+    # as a transient lifecycle race instead of spinning with an invalid FD.
+    if ! exec 3<"$FIFO"; then
+        log "failed to open FIFO for reading: $FIFO"
+        sleep 0.1
+        continue
+    fi
 
     # Do not open the HDMI hardware for a zero-length / cancelled transition.
     dd iflag=fullblock bs="$FRAME_BYTES" count=1 status=none <&3 >"$PREBUFFER" || true

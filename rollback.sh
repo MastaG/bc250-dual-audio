@@ -19,11 +19,11 @@ fi
 
 echo "Rolling back from $BACKUP"
 
-# Stop the v0.8 external EAC3 backend before restoring any previous audio
+# Stop the v0.8+ external EAC3 backend before restoring any previous audio
 # policy. This guarantees it cannot still own HDMI while WirePlumber restarts.
 systemctl --user disable --now bc250-eac3-backend.service 2>/dev/null || true
 
-# Remove files installed by v0.8.
+# Remove files installed by v0.8+.
 sudo rm -f /etc/alsa/conf.d/61-bc250-a52.conf
 sudo rm -f /etc/pipewire/pipewire.conf.d/60-bc250-ac3-output.conf
 sudo rm -f /etc/wireplumber/wireplumber.conf.d/50-bc250-audio.conf
