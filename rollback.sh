@@ -19,12 +19,18 @@ fi
 
 echo "Rolling back from $BACKUP"
 
-# Remove files installed by the dual-output prototype.
+# Stop the v0.8 external EAC3 backend before restoring any previous audio
+# policy. This guarantees it cannot still own HDMI while WirePlumber restarts.
+systemctl --user disable --now bc250-eac3-backend.service 2>/dev/null || true
+
+# Remove files installed by v0.8.
 sudo rm -f /etc/alsa/conf.d/61-bc250-a52.conf
 sudo rm -f /etc/pipewire/pipewire.conf.d/60-bc250-ac3-output.conf
 sudo rm -f /etc/wireplumber/wireplumber.conf.d/50-bc250-audio.conf
 sudo rm -f /usr/local/share/wireplumber/scripts/90-bc250-audio-mode.lua
 sudo rm -f /usr/local/share/wireplumber/scripts/monitors/alsa.lua
+sudo rm -f /usr/local/libexec/bc250-eac3-backend
+sudo rm -f /etc/systemd/user/bc250-eac3-backend.service
 
 restore_user() {
   local tag=$1
@@ -34,6 +40,7 @@ restore_user() {
     cp -a "$BACKUP/user/$tag" "$dest"
   fi
 }
+
 restore_system() {
   local tag=$1
   local dest=$2
@@ -53,9 +60,19 @@ restore_system "system-60-bc250-ac3-output.conf" "/etc/pipewire/pipewire.conf.d/
 restore_system "system-50-bc250-audio.conf" "/etc/wireplumber/wireplumber.conf.d/50-bc250-audio.conf"
 restore_system "system-90-bc250-audio-mode.lua" "/usr/local/share/wireplumber/scripts/90-bc250-audio-mode.lua"
 restore_system "system-alsa.lua" "/usr/local/share/wireplumber/scripts/monitors/alsa.lua"
+restore_system "system-bc250-eac3-backend" "/usr/local/libexec/bc250-eac3-backend"
+restore_system "system-bc250-eac3-backend.service" "/etc/systemd/user/bc250-eac3-backend.service"
+
+systemctl --user daemon-reload
+
+# If the backup already contained an EAC3 service (rollback between two future
+# v0.8+ installs), restore its enable/runtime state sensibly.
+if [[ -f /etc/systemd/user/bc250-eac3-backend.service ]]; then
+  systemctl --user enable --now bc250-eac3-backend.service || true
+fi
 
 systemctl --user restart pipewire pipewire-pulse wireplumber
-sleep 2
+sleep 3
 pactl list sinks short || true
 
 echo "Rollback complete."
