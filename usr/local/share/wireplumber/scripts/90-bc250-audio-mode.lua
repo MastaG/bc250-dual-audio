@@ -1,6 +1,6 @@
 -- BC-250 global native-HDMI / realtime Dolby encoder arbiter
 -- Target: WirePlumber 0.5.17
--- BC-250 policy revision: v0.11
+-- BC-250 policy revision: v0.12
 --
 -- User-visible model:
 --   * stock/native HDMI/DP sink (ACP, EDID/ELD driven)

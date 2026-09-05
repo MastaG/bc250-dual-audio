@@ -61,6 +61,19 @@ if (( ! found )); then
 fi
 
 echo
+echo "=== IEC61937 channel status (what the sink is being told) ==="
+# Only meaningful while an encoded mode is actually selected and playing.
+# Data: non-audio  -> receiver is told to decode this as Dolby (correct)
+# Data: audio      -> receiver treats the bitstream as PCM and plays noise
+if command -v iecset >/dev/null 2>&1; then
+  iecset -c 0 2>/dev/null | grep -E 'Data|Rate' | sed 's/^/  /' || echo "  (unavailable)"
+else
+  echo "  iecset not installed (alsa-utils)"
+fi
+echo "  configured AC3 path: $(grep -E '^[[:space:]]*ac3-alsa-path' \
+  /etc/wireplumber/wireplumber.conf.d/50-bc250-audio.conf 2>/dev/null | tr -s ' ')"
+
+echo
 echo "=== recent BC-250 WirePlumber log ==="
 journalctl --user -u wireplumber --since "10 minutes ago" --no-pager | \
   grep -E 'BC-250|s-bc250-audio|s-monitors|Holding native|reprobe|A52|AC3|EAC3|permit|SESSION|acknowledged|encoded|busy|error|Failed' || true

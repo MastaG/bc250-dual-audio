@@ -1,10 +1,37 @@
-# BC-250 Dual Audio v0.11
+# BC-250 Dual Audio v0.12
 
 Realtime Dolby Digital / Dolby Digital Plus output modes for the AMD BC-250 on
 CachyOS, while keeping the normal HDMI/DisplayPort output completely native and
 EDID/ELD-driven.
 
 Target: **CachyOS / PipeWire 1.6.x / WirePlumber 0.5.17 / AMD BC-250**.
+
+## v0.12
+
+v0.12 changes two things: it stops checking sink capabilities entirely, and it
+fixes the IEC61937 channel status on the AC-3 path.
+
+- **No capability checks anywhere.** The ELD gate on the E-AC-3 helper is
+  removed along with `BC250_EAC3_IGNORE_ELD`. Adapters lie about ELD, so the
+  selected mode is now always pushed to the hardware.
+- **AC-3 now sets the non-audio bit.** The A52 slave moved from a bare
+  `hw:Generic,3` to `hdmi:CARD=Generic,DEV=0` with explicit channel status
+  (`AES0=0x06`, `AES3=0x02`). Measured on hardware, AC-3 previously advertised
+  `Data: audio, Rate: 44100 Hz` while sending a 48 kHz Dolby bitstream; it now
+  correctly advertises `Data: non-audio, Rate: 48000 Hz`. `hw:` cannot carry AES
+  parameters at all, which is why they were missing.
+  Most receivers auto-detect the AC-3 sync word and decoded it anyway, but
+  strict sinks -- notably TVs forwarding audio to a receiver over ARC -- do
+  honour the bit. `plug:bc250_a52_noaes` keeps the old behaviour available.
+- **Both AES value and E-AC-3 bitrate are now knobs** rather than literals, so a
+  receiver that dislikes either can be tested without editing code.
+- **`aplay -q` dropped**, so the "rate is not accurate" warning that indicates a
+  sink cannot carry the 192 kHz E-AC-3 carrier is no longer swallowed.
+- **`check.sh` reports the live IEC61937 channel status**, which is the fastest
+  way to confirm what a receiver is actually being told.
+
+The v0.10 ownership handshake and v0.11 event-driven permit withdrawal are
+unchanged.
 
 ## v0.11
 
@@ -123,32 +150,67 @@ application 5.1 PCM
 FFmpeg's native E-AC-3 encoder is used as 5.1 only. This project does not claim
 7.1 E-AC-3 or Atmos/JOC encoding.
 
-## ELD behaviour
+## No capability checks
 
-By default the external EAC3 helper only opens HDMI when the connected ELD
-advertises E-AC-3 / Dolby Digital Plus. An unsupported monitor can therefore
-show `bc250_eac3_768` but will receive silence rather than a forced compressed
-bitstream.
+v0.12 removes all sink-capability gating. The selected mode is always pushed to
+the hardware, whether or not the connected device claims to support it.
 
-For a deliberate transport test on a monitor whose ELD does not advertise DD+:
+This is deliberate. ELD/EDID data is unreliable in this deployment: both active
+and passive DP->HDMI adapters synthesise their own ELD, and it frequently does
+not describe what is actually downstream of the adapter. A sink that cannot
+handle the stream is expected to reject or misplay it audibly, which is more
+useful than a helper that silently refuses on the strength of bad metadata.
 
-```bash
-systemctl --user edit bc250-eac3-backend.service
-```
+`BC250_EAC3_IGNORE_ELD` is gone; there is no longer anything to override.
 
-Add:
+One consequence worth knowing: an AC-3 stream a sink cannot decode is usually
+audible as loud noise, whereas a correctly flagged E-AC-3 stream a sink cannot
+decode is simply muted. **Silence in E-AC-3 mode is therefore not by itself
+evidence that the helper failed** -- check the journal, which now records the
+rate `aplay` actually obtained (see below).
+
+## Testing knobs
+
+Both encoded paths carry an IEC61937 channel-status byte whose non-audio bit
+tells the receiver to decode the stream as Dolby instead of playing it as PCM.
+v0.12 sets it on both paths. To change or disable it:
+
+**E-AC-3** -- `systemctl --user edit bc250-eac3-backend.service`:
 
 ```ini
 [Service]
-Environment=BC250_EAC3_IGNORE_ELD=1
+Environment=BC250_ENCODED_AES0=0x04   # 0x06 = non-audio set (default)
+Environment=BC250_EAC3_BITRATE=1024k  # 768k default; >640k is the whole point
 ```
 
-Then:
+then `systemctl --user daemon-reload && systemctl --user restart bc250-eac3-backend.service`.
+
+**AC-3** -- in `50-bc250-audio.conf`, point the path at the unflagged variant:
+
+```text
+ac3-alsa-path = "plug:bc250_a52_noaes"
+```
+
+then restart wireplumber. The AC-3 bitrate lives in `61-bc250-a52.conf`.
+
+Note that `bc250_ac3_448` / `bc250_eac3_768` are stable node names, not claims:
+changing a bitrate does not rename the sinks, because renaming them would reset
+every saved output selection.
+
+### Diagnosing a silent encoded mode
+
+E-AC-3 over HDMI requires a **192 kHz** IEC61937 carrier. If the link cannot
+provide it -- for example a stereo-only monitor whose ELD caps the PCM at 48 kHz
+-- `aplay` does not fail. It warns and runs at the lower rate anyway, producing
+a bitstream no receiver can decode. v0.12 no longer passes `aplay -q`, so that
+warning reaches the journal:
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user restart bc250-eac3-backend.service
+journalctl --user -u bc250-eac3-backend | grep -i 'rate is not accurate'
 ```
+
+If you see it, the sink or the adapter in front of it cannot carry DD+, and no
+software setting will change that.
 
 ## Global mutual exclusion
 

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # BC-250 realtime E-AC-3 / Dolby Digital Plus backend.
 #
+# v0.12 deliberately performs NO sink-capability checks. ELD/EDID data is
+# unreliable in this deployment: active and passive DP->HDMI adapters synthesise
+# their own ELD, which frequently does not describe what is actually downstream.
+# The selected mode is therefore always pushed to the hardware, and an
+# unsupported sink is expected to reject or misplay it audibly rather than have
+# this helper silently refuse.
+#
 # v0.11 handshake:
 #   WirePlumber -> bc250.eac3.permit   : EAC3 transition is committed
 #   helper      -> bc250.eac3.session  : helper session is attached / may own HDMI
@@ -18,7 +25,16 @@ RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 FIFO=${BC250_EAC3_FIFO:-$RUNTIME_DIR/bc250-eac3-768.pcm}
 PREBUFFER=$RUNTIME_DIR/bc250-eac3-768.prebuffer.$$
 FRAME_BYTES=$((1536 * 6 * 4))  # one 32 ms E-AC-3 frame: F32LE, 48 kHz, 5.1
-HDMI_DEVICE=${BC250_EAC3_ALSA_DEVICE:-hdmi:CARD=Generic,DEV=0,AES0=0x06}
+# IEC61937 channel-status byte 0. 0x06 sets the non-audio bit, which is what
+# tells a receiver to decode the stream as Dolby rather than play it as PCM.
+# Set BC250_ENCODED_AES0=0x04 to reproduce the pre-v0.12 behaviour where the bit
+# was left clear (an unsupported sink then screeches instead of muting).
+ENCODED_AES0=${BC250_ENCODED_AES0:-0x06}
+HDMI_DEVICE=${BC250_EAC3_ALSA_DEVICE:-hdmi:CARD=Generic,DEV=0,AES0=$ENCODED_AES0}
+# FFmpeg's E-AC-3 encoder is the AC-3 encoder emitting E-AC-3 syntax, so quality
+# tracks bitrate rather than codec generation. 768k is a common DD+ 5.1 rate and
+# exceeds AC-3's 640k ceiling, which is the only real gain this path offers.
+EAC3_BITRATE=${BC250_EAC3_BITRATE:-768k}
 METADATA_NAME=${BC250_EAC3_METADATA_NAME:-default}
 PERMIT_KEY=${BC250_EAC3_PERMIT_KEY:-bc250.eac3.permit}
 SESSION_KEY=${BC250_EAC3_SESSION_KEY:-bc250.eac3.session}
@@ -213,35 +229,6 @@ ensure_fifo() {
     return 0
 }
 
-find_generic_card_dir() {
-    local id
-    for id in /proc/asound/card*/id; do
-        [[ -r "$id" ]] || continue
-        if [[ $(tr -d '\n' < "$id") == "Generic" ]]; then
-            printf '%s\n' "${id%/id}"
-            return 0
-        fi
-    done
-    return 1
-}
-
-eld_supports_eac3() {
-    [[ ${BC250_EAC3_IGNORE_ELD:-0} == 1 ]] && return 0
-
-    local card_dir eld
-    card_dir=$(find_generic_card_dir) || return 1
-
-    for eld in "$card_dir"/eld#*; do
-        [[ -r "$eld" ]] || continue
-        grep -Eq '^[[:space:]]*monitor_present[[:space:]]+1' "$eld" || continue
-        grep -Eq '^[[:space:]]*eld_valid[[:space:]]+1' "$eld" || continue
-        if grep -Eiq 'coding_type.*(E-AC-3|EAC3|DD\+|Dolby Digital Plus)' "$eld"; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 start_pipeline() {
     metadata_set "$HARDWARE_KEY" "$$" || {
         log "failed to publish EAC3 hardware-active metadata"
@@ -251,6 +238,7 @@ start_pipeline() {
     export BC250_EAC3_CHILD_PREBUFFER="$PREBUFFER"
     export BC250_EAC3_CHILD_FRAME_BYTES="$FRAME_BYTES"
     export BC250_EAC3_CHILD_HDMI_DEVICE="$HDMI_DEVICE"
+    export BC250_EAC3_CHILD_BITRATE="$EAC3_BITRATE"
 
     # Read only complete EAC3-frame-sized PCM blocks after the prebuffer.
     # conv=sync pads a final short EOF block instead of exposing a partial 5.1
@@ -263,9 +251,9 @@ start_pipeline() {
             -nostdin -hide_banner -loglevel warning \
             -f f32le -ar 48000 -ac 6 -i pipe:0 \
             -filter:a "pan=5.1|FL=c0|FR=c1|FC=c4|LFE=c5|BL=c2|BR=c3" \
-            -c:a eac3 -b:a 768k -ar 48000 -ac 6 \
+            -c:a eac3 -b:a "$BC250_EAC3_CHILD_BITRATE" -ar 48000 -ac 6 \
             -flush_packets 1 -f spdif pipe:1 | \
-            aplay -q -D "$BC250_EAC3_CHILD_HDMI_DEVICE" -t raw -f S16_LE -c 2 -r 192000
+            aplay -D "$BC250_EAC3_CHILD_HDMI_DEVICE" -t raw -f S16_LE -c 2 -r 192000
     ' &
     PIPELINE_PID=$!
 
@@ -314,13 +302,6 @@ while true; do
         continue
     fi
 
-    if ! eld_supports_eac3; then
-        log "connected sink ELD does not advertise E-AC-3/DD+; discarding E-AC-3 mode PCM"
-        cat <&3 >/dev/null || true
-        close_session
-        continue
-    fi
-
     # Start one event monitor for this session before the permit exists. Once
     # WirePlumber sees SESSION it publishes PERMIT; the monitor's update event
     # is the commit signal. The same monitor remains attached for the whole
@@ -344,7 +325,7 @@ while true; do
         continue
     fi
 
-    log "starting E-AC-3 5.1 @ 768 kbps -> IEC61937 -> $HDMI_DEVICE"
+    log "starting E-AC-3 5.1 @ $EAC3_BITRATE -> IEC61937 -> $HDMI_DEVICE"
 
     if ! start_pipeline; then
         log "failed to start E-AC-3 pipeline"
