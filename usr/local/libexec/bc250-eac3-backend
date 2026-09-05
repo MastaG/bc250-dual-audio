@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # BC-250 realtime E-AC-3 / Dolby Digital Plus backend.
 #
-# v0.10 handshake:
+# v0.11 handshake:
 #   WirePlumber -> bc250.eac3.permit   : EAC3 transition is committed
 #   helper      -> bc250.eac3.session  : helper session is attached / may own HDMI
 #   helper      -> bc250.eac3.hardware : diagnostic; ffmpeg/aplay may own HDMI
 #
-# The helper never opens HDMI until the permit metadata exists. During teardown
-# WirePlumber clears the permit, unloads the FIFO backend and waits for SESSION
-# to disappear before another owner may claim hw:Generic,3.
+# v0.11 keeps one pw-metadata --monitor client attached for each active EAC3
+# session. Permit withdrawal is therefore event-driven: the helper sees the
+# metadata remove event immediately and terminates the ffmpeg/aplay process
+# group instead of waiting for FIFO EOF/unlink. SESSION is cleared only after
+# aplay has been reaped, which is the release acknowledgement WirePlumber waits
+# for before allowing another owner to claim hw:Generic,3.
 set -u -o pipefail
 
 RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
@@ -22,9 +25,12 @@ SESSION_KEY=${BC250_EAC3_SESSION_KEY:-bc250.eac3.session}
 HARDWARE_KEY=${BC250_EAC3_HARDWARE_KEY:-bc250.eac3.hardware}
 PIPELINE_POLL_SEC=${BC250_EAC3_PIPELINE_POLL_SEC:-0.02}
 PIPELINE_TERM_LOOPS=${BC250_EAC3_PIPELINE_TERM_LOOPS:-25} # ~500 ms at default poll
-PERMIT_POLL_SEC=${BC250_EAC3_PERMIT_POLL_SEC:-0.02}
+PERMIT_EVENT_WAIT_SEC=${BC250_EAC3_PERMIT_EVENT_WAIT_SEC:-0.02}
 
 PIPELINE_PID=""
+PERMIT_WATCH_PID=""
+PERMIT_WATCH_FD=""
+PERMIT_WATCH_WRITE_FD=""
 
 log() {
     printf '%s\n' "bc250-eac3-backend: $*" >&2
@@ -47,6 +53,88 @@ metadata_present() {
 
 pipeline_running() {
     [[ -n "$PIPELINE_PID" ]] && kill -0 "$PIPELINE_PID" 2>/dev/null
+}
+
+permit_watcher_running() {
+    [[ -n "$PERMIT_WATCH_PID" ]] && kill -0 "$PERMIT_WATCH_PID" 2>/dev/null
+}
+
+stop_permit_watcher() {
+    local pid=${PERMIT_WATCH_PID:-}
+
+    if [[ -n "$pid" ]]; then
+        kill -TERM "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+
+    if [[ -n "${PERMIT_WATCH_FD:-}" ]]; then
+        exec {PERMIT_WATCH_FD}<&- || true
+    fi
+    if [[ -n "${PERMIT_WATCH_WRITE_FD:-}" ]]; then
+        exec {PERMIT_WATCH_WRITE_FD}>&- || true
+    fi
+
+    PERMIT_WATCH_PID=""
+    PERMIT_WATCH_FD=""
+    PERMIT_WATCH_WRITE_FD=""
+}
+
+start_permit_watcher() {
+    stop_permit_watcher
+
+    # pw-metadata is line-buffered and, with an id+key filter, emits only the
+    # initial/current state and later changes for bc250.eac3.permit. Keeping one
+    # monitor process alive avoids the v0.10 20 ms pw-metadata process polling.
+    coproc BC250_PERMIT_WATCH {
+        exec pw-metadata -m -n "$METADATA_NAME" 0 "$PERMIT_KEY" 2>/dev/null
+    }
+
+    PERMIT_WATCH_FD=${BC250_PERMIT_WATCH[0]}
+    PERMIT_WATCH_WRITE_FD=${BC250_PERMIT_WATCH[1]}
+    PERMIT_WATCH_PID=$BC250_PERMIT_WATCH_PID
+
+    # The monitor never consumes stdin. Close our write side immediately.
+    exec {PERMIT_WATCH_WRITE_FD}>&- || true
+    PERMIT_WATCH_WRITE_FD=""
+
+    if ! permit_watcher_running; then
+        log "failed to start EAC3 permit metadata monitor"
+        stop_permit_watcher
+        return 1
+    fi
+
+    return 0
+}
+
+wait_for_permit_event_or_cancel() {
+    local line
+
+    while true; do
+        # A cancelled transition unloads the pipe backend and normally unlinks
+        # this pathname. Never allow a stale session to reach a hardware open.
+        if [[ ! -p "$FIFO" ]]; then
+            return 1
+        fi
+
+        if ! permit_watcher_running; then
+            log "EAC3 permit metadata monitor exited before hardware permit"
+            return 1
+        fi
+
+        if IFS= read -r -t "$PERMIT_EVENT_WAIT_SEC" -u "$PERMIT_WATCH_FD" line; then
+            case "$line" in
+                update:*"key:'$PERMIT_KEY'"*)
+                    log "EAC3 hardware permit observed; metadata monitor armed"
+                    return 0
+                    ;;
+                remove:*"key:'$PERMIT_KEY'"*)
+                    # This can happen when a transition is cancelled before the
+                    # helper has opened HDMI. Treat it as an explicit cancel.
+                    return 1
+                    ;;
+            esac
+        fi
+    done
 }
 
 stop_pipeline() {
@@ -81,6 +169,7 @@ stop_pipeline() {
 }
 
 close_session() {
+    stop_permit_watcher
     exec 3<&- || true
     metadata_clear "$HARDWARE_KEY"
     metadata_clear "$SESSION_KEY"
@@ -153,18 +242,6 @@ eld_supports_eac3() {
     return 1
 }
 
-wait_for_permit_or_cancel() {
-    while ! metadata_present "$PERMIT_KEY"; do
-        # A cancelled transition unloads the pipe backend and removes the FIFO
-        # pathname. In that case no stale ffmpeg/aplay open is allowed.
-        if [[ ! -p "$FIFO" ]]; then
-            return 1
-        fi
-        sleep "$PERMIT_POLL_SEC"
-    done
-    return 0
-}
-
 start_pipeline() {
     metadata_set "$HARDWARE_KEY" "$$" || {
         log "failed to publish EAC3 hardware-active metadata"
@@ -176,8 +253,8 @@ start_pipeline() {
     export BC250_EAC3_CHILD_HDMI_DEVICE="$HDMI_DEVICE"
 
     # Read only complete EAC3-frame-sized PCM blocks after the prebuffer.
-    # conv=sync pads a final short EOF block instead of exposing a 16-byte
-    # partial 5.1 F32LE sample to FFmpeg during teardown.
+    # conv=sync pads a final short EOF block instead of exposing a partial 5.1
+    # F32LE sample to FFmpeg during teardown.
     setsid bash -c '
         {
             cat "$BC250_EAC3_CHILD_PREBUFFER"
@@ -244,15 +321,24 @@ while true; do
         continue
     fi
 
-    # The bridge can already feed the FIFO at this point, but the final
-    # WirePlumber generation check has not necessarily committed the mode yet.
-    # Do not open HDMI until the explicit permit metadata appears.
-    if ! wait_for_permit_or_cancel; then
+    # Start one event monitor for this session before the permit exists. Once
+    # WirePlumber sees SESSION it publishes PERMIT; the monitor's update event
+    # is the commit signal. The same monitor remains attached for the whole
+    # hardware-owning lifetime and its remove event is the teardown signal.
+    if ! start_permit_watcher; then
+        close_session
+        sleep 0.1
+        continue
+    fi
+
+    if ! wait_for_permit_event_or_cancel; then
         close_session
         continue
     fi
 
-    # Fresh query immediately before launch closes the cancelled-start race.
+    # One final direct query protects the tiny interval between receiving the
+    # permit event and launching the process group. Once launched, withdrawal
+    # is handled by the already-armed persistent monitor, not by polling.
     if ! metadata_present "$PERMIT_KEY" || [[ ! -p "$FIFO" ]]; then
         close_session
         continue
@@ -269,13 +355,29 @@ while true; do
 
     stop_reason="pipeline exited"
     while pipeline_running; do
-        # pipe-tunnel unlink is the active teardown signal. WirePlumber clears
-        # PERMIT before doing this, then waits for SESSION to disappear.
+        local_line=""
+
+        # FIFO disappearance is retained as a secondary fail-safe, but v0.11's
+        # primary teardown signal is the PipeWire metadata remove event.
         if [[ ! -p "$FIFO" ]]; then
             stop_reason="PipeWire FIFO backend disappeared"
             break
         fi
-        sleep "$PIPELINE_POLL_SEC"
+
+        if ! permit_watcher_running; then
+            stop_reason="EAC3 permit metadata monitor exited"
+            break
+        fi
+
+        if IFS= read -r -t "$PERMIT_EVENT_WAIT_SEC" -u "$PERMIT_WATCH_FD" local_line; then
+            case "$local_line" in
+                remove:*"key:'$PERMIT_KEY'"*)
+                    log "EAC3 hardware permit withdrawal event received"
+                    stop_reason="EAC3 hardware permit withdrawn"
+                    break
+                    ;;
+            esac
+        fi
     done
 
     if pipeline_running; then

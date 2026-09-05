@@ -1,4 +1,4 @@
-# BC-250 Dual Audio v0.10
+# BC-250 Dual Audio v0.11
 
 Realtime Dolby Digital / Dolby Digital Plus output modes for the AMD BC-250 on
 CachyOS, while keeping the normal HDMI/DisplayPort output completely native and
@@ -6,74 +6,75 @@ EDID/ELD-driven.
 
 Target: **CachyOS / PipeWire 1.6.x / WirePlumber 0.5.17 / AMD BC-250**.
 
-## v0.10
+## v0.11
 
-v0.10 fixes the E-AC-3 teardown race found during real switching tests in v0.9.
-The v0.9 FIFO lifecycle fix worked, but `ffmpeg | aplay` could remain alive for
-several seconds after WirePlumber had destroyed the EAC3 PipeWire graph. Native
-HDMI could then reopen `hw:Generic,3` too early and hit `EBUSY`.
+v0.11 keeps the v0.10 permit/session ownership handshake, but fixes the long
+8-9 second E-AC-3 teardown observed during real switching tests. v0.10 was
+safe -- it kept the encoded hardware lock until the helper had really released
+HDMI -- but the helper only noticed teardown when the PipeWire FIFO disappeared
+or reached EOF. On this stack that could take several seconds.
 
-v0.10 replaces timer-only EAC3 release assumptions with an explicit two-way
-ownership handshake:
+v0.11 makes **permit withdrawal event-driven** with one persistent
+`pw-metadata --monitor` client for each active EAC3 session:
 
 ```text
 WirePlumber                    bc250-eac3-backend
 -----------                    ------------------
-EAC3 graph synced
+FIFO/bridge synced
+SESSION appears <------------- helper attached
      |
-     +-- create PERMIT ------> may open HDMI
-                               publish SESSION metadata
-                               start ffmpeg/aplay
+     +-- publish PERMIT -----> pw-metadata monitor receives update
+                               ffmpeg/aplay may open HDMI
 
 leave EAC3
      |
-     +-- clear PERMIT metadata
-     +-- unload FIFO backend -> helper sees FIFO disappear
-                               terminate complete pipeline process group
+     +-- delete PERMIT -----> pw-metadata monitor receives remove
+                               TERM complete ffmpeg/aplay process group
                                wait until aplay is gone
-                               clear HARDWARE metadata
-                               clear SESSION metadata
+                               clear HARDWARE
+                               clear SESSION
      |
-     +-- wait SESSION gone <--- release acknowledgement
+     +-- wait SESSION gone <-- release acknowledgement
      |
      +-- 1000 ms guard
      |
      +-- native / AC3 / next EAC3 owner may start
 ```
 
-The handshake uses namespaced keys in PipeWire's `default` metadata object:
+The metadata monitor is not repeatedly spawned or polled. One line-buffered
+`pw-metadata -m -n default 0 bc250.eac3.permit` process stays attached while an
+EAC3 session is active. The helper blocks on its event stream with a short read
+timeout only so it can also detect an unexpected encoder exit or FIFO removal.
+
+The handshake still uses these namespaced keys in PipeWire's `default` metadata
+object:
 
 ```text
-bc250.eac3.permit    WirePlumber commit / stop permission
+bc250.eac3.permit    WirePlumber commit / immediate stop signal
 bc250.eac3.session   helper attached; release acknowledgement
 bc250.eac3.hardware  diagnostic: ffmpeg/aplay may own HDMI
 ```
 
-The only runtime filesystem object is the PCM FIFO:
+Important v0.11 changes:
 
-```text
-$XDG_RUNTIME_DIR/bc250-eac3-768.pcm
-```
+- `bc250.eac3.permit` deletion is now the **primary teardown signal**.
+- The helper terminates the complete `setsid` process group immediately after
+  the metadata remove event, instead of waiting for FIFO EOF/unlink.
+- FIFO disappearance remains as a secondary fail-safe.
+- If the metadata monitor itself exits unexpectedly while EAC3 owns HDMI, the
+  helper fails safe and terminates the encoder pipeline.
+- A fresh permit query immediately before launch is retained to close the small
+  commit/start race; there is no repeated `pw-metadata` process polling while
+  EAC3 is running.
+- `bc250.eac3.session` is still cleared only after `aplay` has been reaped, so
+  WirePlumber never releases the global hardware lock based on a timer alone.
+- v0.10's process-group teardown, release acknowledgement and complete-frame PCM
+  relay remain intact.
+- v0.9's FIFO re-create/retry fix remains intact.
 
-Important v0.10 changes:
-
-- WirePlumber grants the EAC3 hardware permit only after the FIFO backend and
-  bridge are loaded, PipeWire has synced, and the requested generation is still
-  current. A cancelled transition can therefore never perform a late HDMI open.
-- WirePlumber withdraws the permit **before** tearing down the EAC3 graph.
-- The helper runs the PCM feeder, FFmpeg and `aplay` in a dedicated process
-  group and actively terminates that group as soon as the PipeWire FIFO backend
-  disappears during teardown.
-- The helper clears `bc250.eac3.session` only after the complete process group
-  is reaped, which confirms that `aplay` has closed the ALSA device.
-- WirePlumber waits for that acknowledgement before it starts the normal
-  hardware-release guard or allows native/AC3 to reclaim the physical PCM.
-- If release takes unexpectedly long, WirePlumber logs a warning after 3 s but
-  remains fail-safe and continues waiting instead of opening a competing sink.
-- The PCM relay now feeds FFmpeg in complete 1536-sample EAC3 frame blocks and
-  pads only a final short block, avoiding the previous `Invalid PCM packet`
-  message caused by a trailing 16-byte partial 5.1 F32LE sample.
-- v0.9's FIFO re-create/retry fix remains in place.
+Expected practical switching time after EAC3 permit withdrawal is now roughly
+the encoder termination time plus the existing 1000 ms hardware guard, instead
+of the previous 8-9 second FIFO/EOF delay.
 
 ## Visible outputs
 
@@ -231,9 +232,8 @@ For an EAC3 -> native handover, the intended log order is now:
 EAC3 hardware permit withdrawn
 unloading eac3 bridge
 ...
-EAC3 backend graph gone; waiting for helper SESSION release acknowledgement
-...
-bc250-eac3-backend: stopping E-AC-3 pipeline (PipeWire FIFO backend disappeared)
+bc250-eac3-backend: EAC3 hardware permit withdrawal event received
+bc250-eac3-backend: stopping E-AC-3 pipeline (EAC3 hardware permit withdrawn)
 bc250-eac3-backend: hardware release acknowledged
 ...
 EAC3 helper release acknowledged

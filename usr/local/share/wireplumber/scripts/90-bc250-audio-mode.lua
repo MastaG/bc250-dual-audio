@@ -1,6 +1,6 @@
 -- BC-250 global native-HDMI / realtime Dolby encoder arbiter
 -- Target: WirePlumber 0.5.17
--- BC-250 policy revision: v0.10
+-- BC-250 policy revision: v0.11
 --
 -- User-visible model:
 --   * stock/native HDMI/DP sink (ACP, EDID/ELD driven)
@@ -20,6 +20,7 @@
 --   * AC3 uses ALSA a52 @ 448 kbps
 --   * EAC3 uses a PipeWire FIFO -> FFmpeg eac3 @ 768 kbps -> IEC61937 -> HDMI
 --   * EAC3 commit/release uses PipeWire metadata permit + helper SESSION ack
+--   * v0.11 helper observes permit withdrawal via persistent pw-metadata monitor
 --   * rapid native/AC3/EAC3 changes are serialized; newest desired mode wins
 
 local lutils = require ("linking-utils")

@@ -82,11 +82,21 @@ journalctl --user -u bc250-eac3-backend --since "10 minutes ago" --no-pager | ta
 echo
 echo "=== EAC3 lifecycle / teardown errors ==="
 EAC3_ERRORS=$(journalctl --user -u bc250-eac3-backend --since "10 minutes ago" --no-pager 2>/dev/null | \
-  grep -Ei 'No such file|Bestand of map bestaat niet|Bad file descriptor|Ongeldige bestandsdescriptor|failed to (open|create) FIFO|Invalid PCM packet|pipeline did not stop|failed to start E-AC-3 pipeline' || true)
+  grep -Ei 'No such file|Bestand of map bestaat niet|Bad file descriptor|Ongeldige bestandsdescriptor|failed to (open|create) FIFO|Invalid PCM packet|pipeline did not stop|failed to start E-AC-3 pipeline|failed to start EAC3 permit metadata monitor|permit metadata monitor exited' || true)
 if [[ -n "$EAC3_ERRORS" ]]; then
   echo "$EAC3_ERRORS"
 else
   echo "None."
+fi
+
+echo
+echo "=== EAC3 permit monitor events ==="
+MONITOR_EVENTS=$(journalctl --user -u bc250-eac3-backend --since "10 minutes ago" --no-pager 2>/dev/null | \
+  grep -E 'hardware permit observed; metadata monitor armed|hardware permit withdrawal event received' || true)
+if [[ -n "$MONITOR_EVENTS" ]]; then
+  echo "$MONITOR_EVENTS"
+else
+  echo "No recent permit-monitor events (normal if EAC3 was not selected)."
 fi
 
 echo
