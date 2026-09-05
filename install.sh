@@ -11,7 +11,7 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP="$HOME/.local/state/bc250-audio-backup/$STAMP"
 mkdir -p "$BACKUP/user" "$BACKUP/system"
 
-echo "BC-250 Dual Audio v0.9 installer"
+echo "BC-250 Dual Audio v0.10 installer"
 echo "Native HDMI/DP + AC3 448 kbps + E-AC3 768 kbps"
 echo "Backup: $BACKUP"
 
@@ -33,7 +33,7 @@ fi
 if [[ -f "$STOCK_ALSA" && "${BC250_ALLOW_UNTESTED_WP:-0}" != "1" ]]; then
   STOCK_ALSA_SHA256=$(sha256sum "$STOCK_ALSA" | awk '{print $1}')
   if [[ "$STOCK_ALSA_SHA256" != "$EXPECTED_STOCK_ALSA_SHA256" ]]; then
-    echo "ERROR: distro stock alsa.lua does not match the WirePlumber 0.5.17 base used by v0.9." >&2
+    echo "ERROR: distro stock alsa.lua does not match the WirePlumber 0.5.17 base used by v0.10." >&2
     echo "Expected: $EXPECTED_STOCK_ALSA_SHA256" >&2
     echo "Found:    $STOCK_ALSA_SHA256" >&2
     echo "Refusing to install a full monitor shadow override onto an unknown base." >&2
@@ -42,7 +42,7 @@ if [[ -f "$STOCK_ALSA" && "${BC250_ALLOW_UNTESTED_WP:-0}" != "1" ]]; then
   fi
 fi
 
-for cmd in ffmpeg aplay pactl wpctl pw-metadata mkfifo dd sha256sum grep tr stat; do
+for cmd in ffmpeg aplay pactl wpctl pw-metadata mkfifo dd sha256sum grep tr stat setsid; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "ERROR: required command not found: $cmd" >&2
     exit 4
@@ -94,7 +94,7 @@ backup_system_file() {
   fi
 }
 
-# Back up both old prototype files and all host-wide files replaced by v0.9.
+# Back up both old prototype files and all host-wide files replaced by v0.10.
 backup_user_file "$HOME/.config/wireplumber/wireplumber.conf.d/50-bc250-ac3.conf" "user-50-bc250-ac3.conf"
 backup_user_file "$HOME/.local/share/wireplumber/scripts/monitors/alsa.lua" "user-alsa.lua"
 backup_user_file "$HOME/.config/pipewire/pipewire.conf.d/ac3-sink.conf" "user-ac3-sink.conf"

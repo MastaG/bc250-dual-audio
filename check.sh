@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -u
 
+RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+FIFO="$RUNTIME_DIR/bc250-eac3-768.pcm"
+PERMIT_KEY="bc250.eac3.permit"
+SESSION_KEY="bc250.eac3.session"
+HARDWARE_KEY="bc250.eac3.hardware"
+
 echo "=== versions ==="
 wireplumber --version 2>/dev/null || true
 pipewire --version 2>/dev/null || true
@@ -21,7 +27,23 @@ pw-metadata -n default 0 2>/dev/null | \
 
 echo
 echo "=== EAC3 helper ==="
-systemctl --user --no-pager --full status bc250-eac3-backend.service | sed -n '1,14p' || true
+systemctl --user --no-pager --full status bc250-eac3-backend.service | sed -n '1,16p' || true
+
+echo
+echo "=== EAC3 ownership handshake ==="
+if [[ -p "$FIFO" ]]; then
+  ls -l "$FIFO" 2>/dev/null || true
+else
+  echo "FIFO absent: $FIFO"
+fi
+for key in "$PERMIT_KEY" "$SESSION_KEY" "$HARDWARE_KEY"; do
+  value=$(pw-metadata -n default 0 "$key" 2>/dev/null | grep -F "key:'$key'" || true)
+  if [[ -n "$value" ]]; then
+    echo "$value"
+  else
+    echo "metadata absent: $key"
+  fi
+done
 
 echo
 echo "=== ELD E-AC3/DD+ advertisement ==="
@@ -41,23 +63,38 @@ fi
 echo
 echo "=== recent BC-250 WirePlumber log ==="
 journalctl --user -u wireplumber --since "10 minutes ago" --no-pager | \
-  grep -E 'BC-250|s-bc250-audio|s-monitors|Holding native|reprobe|A52|AC3|EAC3|encoded|busy|error|Failed' || true
+  grep -E 'BC-250|s-bc250-audio|s-monitors|Holding native|reprobe|A52|AC3|EAC3|permit|SESSION|acknowledged|encoded|busy|error|Failed' || true
 
 echo
 echo "=== recent PipeWire hardware errors ==="
-journalctl --user -u pipewire --since "10 minutes ago" --no-pager | \
-  grep -Ei 'busy|EBUSY|playback open failed|Start error' || true
+PW_ERRORS=$(journalctl --user -u pipewire --since "10 minutes ago" --no-pager 2>/dev/null | \
+  grep -Ei 'busy|EBUSY|playback open failed|Start error' || true)
+if [[ -n "$PW_ERRORS" ]]; then
+  echo "$PW_ERRORS"
+else
+  echo "None."
+fi
 
 echo
 echo "=== recent EAC3 helper log ==="
-journalctl --user -u bc250-eac3-backend --since "10 minutes ago" --no-pager | tail -40 || true
+journalctl --user -u bc250-eac3-backend --since "10 minutes ago" --no-pager | tail -60 || true
 
 echo
-echo "=== EAC3 FIFO lifecycle errors ==="
-EAC3_FIFO_ERRORS=$(journalctl --user -u bc250-eac3-backend --since "10 minutes ago" --no-pager 2>/dev/null | \
-  grep -Ei 'No such file|Bestand of map bestaat niet|Bad file descriptor|Ongeldige bestandsdescriptor|failed to (open|create) FIFO' || true)
-if [[ -n "$EAC3_FIFO_ERRORS" ]]; then
-  echo "$EAC3_FIFO_ERRORS"
+echo "=== EAC3 lifecycle / teardown errors ==="
+EAC3_ERRORS=$(journalctl --user -u bc250-eac3-backend --since "10 minutes ago" --no-pager 2>/dev/null | \
+  grep -Ei 'No such file|Bestand of map bestaat niet|Bad file descriptor|Ongeldige bestandsdescriptor|failed to (open|create) FIFO|Invalid PCM packet|pipeline did not stop|failed to start E-AC-3 pipeline' || true)
+if [[ -n "$EAC3_ERRORS" ]]; then
+  echo "$EAC3_ERRORS"
+else
+  echo "None."
+fi
+
+echo
+echo "=== EAC3 release wait warnings ==="
+RELEASE_WARN=$(journalctl --user -u wireplumber --since "10 minutes ago" --no-pager 2>/dev/null | \
+  grep -F 'still waiting for EAC3 helper to release HDMI' || true)
+if [[ -n "$RELEASE_WARN" ]]; then
+  echo "$RELEASE_WARN"
 else
   echo "None."
 fi

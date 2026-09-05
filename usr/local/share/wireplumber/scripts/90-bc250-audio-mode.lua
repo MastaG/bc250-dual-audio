@@ -1,6 +1,6 @@
 -- BC-250 global native-HDMI / realtime Dolby encoder arbiter
 -- Target: WirePlumber 0.5.17
--- BC-250 policy revision: v0.9
+-- BC-250 policy revision: v0.10
 --
 -- User-visible model:
 --   * stock/native HDMI/DP sink (ACP, EDID/ELD driven)
@@ -19,6 +19,7 @@
 --     waits a guard interval + PipeWire sync before taking hardware ownership
 --   * AC3 uses ALSA a52 @ 448 kbps
 --   * EAC3 uses a PipeWire FIFO -> FFmpeg eac3 @ 768 kbps -> IEC61937 -> HDMI
+--   * EAC3 commit/release uses PipeWire metadata permit + helper SESSION ack
 --   * rapid native/AC3/EAC3 changes are serialized; newest desired mode wins
 
 local lutils = require ("linking-utils")
@@ -37,6 +38,9 @@ local EAC3_PIPE_BACKEND_NAME = cfg["eac3-pipe-backend-node"] or
 local EAC3_FIFO_NAME = cfg["eac3-fifo-name"] or "bc250-eac3-768.pcm"
 local XDG_RUNTIME_DIR = os.getenv ("XDG_RUNTIME_DIR") or "/tmp"
 local EAC3_FIFO = XDG_RUNTIME_DIR .. "/" .. EAC3_FIFO_NAME
+local EAC3_PERMIT_KEY = cfg["eac3-permit-key"] or "bc250.eac3.permit"
+local EAC3_SESSION_KEY = cfg["eac3-session-key"] or "bc250.eac3.session"
+local EAC3_HARDWARE_KEY = cfg["eac3-hardware-key"] or "bc250.eac3.hardware"
 
 -- Upgrade compatibility: v0.7 used this node.name. install.sh migrates the
 -- configured default, but recognizing it here also makes manual upgrades safe.
@@ -48,6 +52,8 @@ local RETRY_MS = tonumber (cfg["backend-retry-ms"] or "1000") or 1000
 local ALSA_START_DELAY = tonumber (cfg["api-alsa-start-delay"] or "1536") or 1536
 local STARTUP_SETTLE_MS = tonumber (cfg["startup-settle-ms"] or "1500") or 1500
 local NATIVE_PROBE_TIMEOUT_MS = tonumber (cfg["native-probe-timeout-ms"] or "5000") or 5000
+local EAC3_RELEASE_WARN_MS = tonumber (cfg["eac3-release-warn-ms"] or "3000") or 3000
+local EAC3_ATTACH_TIMEOUT_MS = tonumber (cfg["eac3-attach-timeout-ms"] or "2000") or 2000
 
 -- Historical setting name kept for v0.5-v0.7 compatibility. In v0.8+ this is
 -- the generic encoded-hardware lock for either AC-3 or E-AC-3.
@@ -245,6 +251,41 @@ local function get_configured_sink_name ()
   return parse_metadata_node_name (value)
 end
 
+local function metadata_key_present (key)
+  if default_metadata == nil or not metadata_ready then
+    return false
+  end
+  local value = default_metadata:find (0, key)
+  return value ~= nil
+end
+
+local function clear_eac3_permit (reason)
+  if default_metadata == nil or not metadata_ready then
+    return
+  end
+
+  -- Do not first gate this on Metadata.find(): a Metadata.set() is only
+  -- reflected by find() after a PipeWire round-trip. An unconditional unset is
+  -- idempotent and also closes an immediate grant->cancel race.
+  default_metadata:set (0, EAC3_PERMIT_KEY, nil, nil)
+  log:notice ("EAC3 hardware permit withdrawn (" .. tostring (reason) .. ")")
+end
+
+local function grant_eac3_permit (gen)
+  if default_metadata == nil or not metadata_ready then
+    log:warning ("cannot grant EAC3 hardware permit: default metadata unavailable")
+    return false
+  end
+
+  default_metadata:set (0, EAC3_PERMIT_KEY, nil, tostring (gen))
+  log:notice ("EAC3 hardware permit granted for generation " .. tostring (gen))
+  return true
+end
+
+local function eac3_helper_session_active ()
+  return metadata_key_present (EAC3_SESSION_KEY)
+end
+
 -- Return the sink name that is authoritative for the BC-250 mode and where
 -- that authority came from. A configured default survives node disappearance,
 -- so transient effective-default changes during HDMI hotplug cannot flip mode.
@@ -296,6 +337,13 @@ local function encoded_backend_present ()
 end
 
 local function unload_bridge ()
+  if encoded_backend_mode == "eac3" then
+    -- Stop permission is withdrawn before graph teardown. The external helper
+    -- cannot start a stale EAC3 pipeline after this point, and the FIFO backend
+    -- disappearing will actively terminate an already-running process group.
+    clear_eac3_permit ("EAC3 bridge teardown")
+  end
+
   if encoded_bridge ~= nil then
     log:notice ("unloading " .. tostring (encoded_backend_mode or "encoded") ..
         " bridge")
@@ -308,6 +356,10 @@ local function unload_bridge ()
 end
 
 local function destroy_encoded_backend ()
+  if encoded_backend_mode == "eac3" or eac3_pipe_backend ~= nil then
+    clear_eac3_permit ("EAC3 backend destroy")
+  end
+
   if ac3_backend_pending ~= nil then
     request_destroy (ac3_backend_pending, "pending AC3 backend")
     ac3_backend_pending = nil
@@ -409,16 +461,80 @@ local function create_encoded_bridge (gen, mode, frontend, backend_name)
     end
 
     encoded_backend_mode = mode
-    if mode == "ac3" then
-      log:notice ("AC3 mode READY: bc250_ac3_448 -> A52 448 kbps -> hw:Generic,3")
-    else
-      log:notice ("EAC3 mode READY: bc250_eac3_768 -> PCM FIFO -> " ..
-          "FFmpeg E-AC-3 768 kbps -> IEC61937 -> HDMI")
+
+    local function finish_ready ()
+      if mode == "ac3" then
+        log:notice ("AC3 mode READY: bc250_ac3_448 -> A52 448 kbps -> hw:Generic,3")
+      else
+        log:notice ("EAC3 mode READY: bc250_eac3_768 -> PCM FIFO -> " ..
+            "FFmpeg E-AC-3 768 kbps -> IEC61937 -> HDMI")
+      end
+
+      transition_busy = false
+      schedule_linking_rescan ()
+      reconcile ()
     end
 
-    transition_busy = false
-    schedule_linking_rescan ()
-    reconcile ()
+    if mode ~= "eac3" then
+      finish_ready ()
+      return
+    end
+
+    -- The bridge is alive and can feed PCM, but the helper is not allowed to
+    -- open HDMI yet. First wait until its SESSION metadata is visible to this
+    -- same metadata proxy; only then grant the permit. This makes SESSION a
+    -- reliable release acknowledgement for every committed EAC3 hardware open.
+    local attach_waited_ms = 0
+    local function wait_helper_attach ()
+      timer_source = nil
+
+      if gen ~= generation or desired_mode ~= "eac3" then
+        unload_bridge ()
+        destroy_encoded_backend ()
+        transition_finished (gen)
+        reconcile ()
+        return false
+      end
+
+      if eac3_helper_session_active () then
+        log:notice ("EAC3 helper SESSION attached; committing hardware permit")
+        if not grant_eac3_permit (gen) then
+          unload_bridge ()
+          destroy_encoded_backend ()
+          transition_busy = false
+          cancel_timer ()
+          timer_source = Core.timeout_add (RETRY_MS, function ()
+            timer_source = nil
+            reconcile ()
+            return false
+          end)
+          return false
+        end
+        finish_ready ()
+        return false
+      end
+
+      attach_waited_ms = attach_waited_ms + POLL_MS
+      if attach_waited_ms >= EAC3_ATTACH_TIMEOUT_MS then
+        log:warning ("EAC3 helper SESSION did not attach within " ..
+            tostring (EAC3_ATTACH_TIMEOUT_MS) .. " ms; retrying without opening HDMI")
+        unload_bridge ()
+        destroy_encoded_backend ()
+        transition_busy = false
+        cancel_timer ()
+        timer_source = Core.timeout_add (RETRY_MS, function ()
+          timer_source = nil
+          reconcile ()
+          return false
+        end)
+        return false
+      end
+
+      timer_source = Core.timeout_add (POLL_MS, wait_helper_attach)
+      return false
+    end
+
+    wait_helper_attach ()
   end)
 end
 
@@ -692,6 +808,33 @@ local function start_encoded (gen, mode)
   timer_source = Core.timeout_add (POLL_MS, wait_native)
 end
 
+local function wait_eac3_helper_release (context, continuation)
+  local waited_ms = 0
+  local warned = false
+
+  local function poll ()
+    timer_source = nil
+
+    if not eac3_helper_session_active () then
+      log:notice ("EAC3 helper release acknowledged (" .. tostring (context) .. ")")
+      continuation ()
+      return false
+    end
+
+    waited_ms = waited_ms + POLL_MS
+    if not warned and waited_ms >= EAC3_RELEASE_WARN_MS then
+      warned = true
+      log:warning ("still waiting for EAC3 helper to release HDMI after " ..
+          tostring (waited_ms) .. " ms; keeping encoded hardware lock active")
+    end
+
+    timer_source = Core.timeout_add (POLL_MS, poll)
+    return false
+  end
+
+  poll ()
+end
+
 local function stop_encoded_then (gen, next_mode, next_native_name)
   transition_busy = true
 
@@ -725,69 +868,77 @@ local function stop_encoded_then (gen, next_mode, next_native_name)
             " backend destroy: " .. tostring (destroy_err))
       end
 
-      log:notice (old_label .. " backend gone; starting " ..
-          tostring (SWITCH_DELAY_MS) .. " ms hardware guard")
+      local function start_release_guard ()
+        log:notice (old_label .. " backend graph gone; starting " ..
+            tostring (SWITCH_DELAY_MS) ..
+            " ms hardware guard after release acknowledgement")
 
-      cancel_timer ()
-      timer_source = Core.timeout_add (SWITCH_DELAY_MS, function ()
-        timer_source = nil
-
-        if gen ~= generation then
-          transition_finished (gen)
-          reconcile ()
-          return false
-        end
-
-        if is_encoded_mode (next_mode) then
-          -- Native remains locked out throughout encoded->encoded switching;
-          -- after one release guard the replacement backend can claim hardware.
-          set_encoded_hardware_lock (true,
-              "encoded handover to " .. tostring (next_mode))
-          Core.sync (function (sync_err)
-            if sync_err ~= nil then
-              log:warning ("PipeWire sync failed before encoded handover: " ..
-                  tostring (sync_err))
-            end
-            if gen ~= generation or desired_mode ~= next_mode then
-              transition_finished (gen)
-              reconcile ()
-              return
-            end
-            create_backend_for_mode (gen, next_mode)
-          end)
-          return false
-        end
-
-        -- No encoded owner remains. Native ACP may now open hw:Generic,3.
-        set_encoded_hardware_lock (false, "encoded backend destroyed and guard elapsed")
-        clear_native_probe_request ()
-
-        Core.sync (function (sync_err)
-          if sync_err ~= nil then
-            log:warning ("PipeWire sync failed before returning to target: " ..
-                tostring (sync_err))
-          end
+        cancel_timer ()
+        timer_source = Core.timeout_add (SWITCH_DELAY_MS, function ()
+          timer_source = nil
 
           if gen ~= generation then
             transition_finished (gen)
             reconcile ()
-            return
+            return false
           end
 
-          if next_mode == "native" then
-            set_effective_target (next_native_name, "native mode ready")
-            log:notice ("native mode READY: " .. tostring (next_native_name))
-          else
-            set_effective_target (nil, "non-BC250 output selected")
-            log:notice ("BC-250 arbitration released for other output")
+          if is_encoded_mode (next_mode) then
+            set_encoded_hardware_lock (true,
+                "encoded handover to " .. tostring (next_mode))
+            Core.sync (function (sync_err)
+              if sync_err ~= nil then
+                log:warning ("PipeWire sync failed before encoded handover: " ..
+                    tostring (sync_err))
+              end
+              if gen ~= generation or desired_mode ~= next_mode then
+                transition_finished (gen)
+                reconcile ()
+                return
+              end
+              create_backend_for_mode (gen, next_mode)
+            end)
+            return false
           end
 
-          transition_busy = false
-          schedule_linking_rescan ()
+          set_encoded_hardware_lock (false,
+              "encoded backend released, acknowledged and guard elapsed")
+          clear_native_probe_request ()
+
+          Core.sync (function (sync_err)
+            if sync_err ~= nil then
+              log:warning ("PipeWire sync failed before returning to target: " ..
+                  tostring (sync_err))
+            end
+
+            if gen ~= generation then
+              transition_finished (gen)
+              reconcile ()
+              return
+            end
+
+            if next_mode == "native" then
+              set_effective_target (next_native_name, "native mode ready")
+              log:notice ("native mode READY: " .. tostring (next_native_name))
+            else
+              set_effective_target (nil, "non-BC250 output selected")
+              log:notice ("BC-250 arbitration released for other output")
+            end
+
+            transition_busy = false
+            schedule_linking_rescan ()
+          end)
+
+          return false
         end)
+      end
 
-        return false
-      end)
+      if old_mode == "eac3" then
+        log:notice ("EAC3 backend graph gone; waiting for helper SESSION release acknowledgement")
+        wait_eac3_helper_release ("mode handover", start_release_guard)
+      else
+        start_release_guard ()
+      end
     end)
   end)
 end
@@ -819,26 +970,13 @@ local function refresh_native_during_encoded (gen)
             tostring (destroy_err))
       end
 
-      cancel_timer ()
-      log:notice ("hotplug reprobe: encoded backend gone; starting " ..
-          tostring (SWITCH_DELAY_MS) .. " ms release guard")
+      local function start_hotplug_release_guard ()
+        cancel_timer ()
+        log:notice ("hotplug reprobe: encoded backend graph gone; starting " ..
+            tostring (SWITCH_DELAY_MS) ..
+            " ms release guard after release acknowledgement")
 
-      timer_source = Core.timeout_add (SWITCH_DELAY_MS, function ()
-        timer_source = nil
-
-        if gen ~= generation or not is_encoded_mode (desired_mode) then
-          set_encoded_hardware_lock (false, "hotplug reprobe superseded")
-          clear_native_probe_request ()
-          transition_finished (gen)
-          reconcile ()
-          return false
-        end
-
-        set_encoded_hardware_lock (false, "hotplug native reprobe window")
-        log:notice ("hotplug reprobe: native HDMI may open hardware now")
-
-        local remaining = NATIVE_PROBE_TIMEOUT_MS
-        local function wait_native_reprobe ()
+        timer_source = Core.timeout_add (SWITCH_DELAY_MS, function ()
           timer_source = nil
 
           if gen ~= generation or not is_encoded_mode (desired_mode) then
@@ -849,93 +987,116 @@ local function refresh_native_during_encoded (gen)
             return false
           end
 
-          local natives = get_native_nodes ()
-          local found = #natives > 0
-          local all_suspended = found
+          set_encoded_hardware_lock (false, "hotplug native reprobe window")
+          log:notice ("hotplug reprobe: native HDMI may open hardware now")
 
-          for _, node in ipairs (natives) do
-            local state, state_err = node:get_state ()
-            if state == "idle" then
-              pcall (function () node:send_command ("Suspend") end)
-              all_suspended = false
-            elseif state ~= "suspended" then
-              all_suspended = false
-              log:debug ("hotplug reprobe waiting for native HDMI; state=" ..
-                  tostring (state) .. " err=" .. tostring (state_err))
+          local remaining = NATIVE_PROBE_TIMEOUT_MS
+          local function wait_native_reprobe ()
+            timer_source = nil
+
+            if gen ~= generation or not is_encoded_mode (desired_mode) then
+              set_encoded_hardware_lock (false, "hotplug reprobe superseded")
+              clear_native_probe_request ()
+              transition_finished (gen)
+              reconcile ()
+              return false
             end
-          end
 
-          if found and all_suspended then
-            clear_native_probe_request ()
-            set_encoded_hardware_lock (true,
-                "native reprobe complete; reclaiming " .. tostring (desired_mode))
-            log:notice ("hotplug reprobe: native HDMI is visible and suspended; " ..
-                "starting " .. tostring (SWITCH_DELAY_MS) ..
-                " ms encoded reclaim guard")
+            local natives = get_native_nodes ()
+            local found = #natives > 0
+            local all_suspended = found
 
-            timer_source = Core.timeout_add (SWITCH_DELAY_MS, function ()
-              timer_source = nil
-
-              if gen ~= generation or not is_encoded_mode (desired_mode) then
-                set_encoded_hardware_lock (false, "encoded reclaim superseded")
-                transition_finished (gen)
-                reconcile ()
-                return false
+            for _, node in ipairs (natives) do
+              local state, state_err = node:get_state ()
+              if state == "idle" then
+                pcall (function () node:send_command ("Suspend") end)
+                all_suspended = false
+              elseif state ~= "suspended" then
+                all_suspended = false
+                log:debug ("hotplug reprobe waiting for native HDMI; state=" ..
+                    tostring (state) .. " err=" .. tostring (state_err))
               end
+            end
 
-              Core.sync (function (sync_err)
+            if found and all_suspended then
+              clear_native_probe_request ()
+              set_encoded_hardware_lock (true,
+                  "native reprobe complete; reclaiming " .. tostring (desired_mode))
+              log:notice ("hotplug reprobe: native HDMI is visible and suspended; " ..
+                  "starting " .. tostring (SWITCH_DELAY_MS) ..
+                  " ms encoded reclaim guard")
+
+              timer_source = Core.timeout_add (SWITCH_DELAY_MS, function ()
+                timer_source = nil
+
                 if gen ~= generation or not is_encoded_mode (desired_mode) then
                   set_encoded_hardware_lock (false, "encoded reclaim superseded")
                   transition_finished (gen)
                   reconcile ()
-                  return
+                  return false
                 end
 
-                if sync_err ~= nil then
-                  log:warning ("PipeWire sync failed before encoded hotplug reclaim: " ..
-                      tostring (sync_err))
-                end
+                Core.sync (function (sync_err)
+                  if gen ~= generation or not is_encoded_mode (desired_mode) then
+                    set_encoded_hardware_lock (false, "encoded reclaim superseded")
+                    transition_finished (gen)
+                    reconcile ()
+                    return
+                  end
 
-                log:notice ("hotplug reprobe complete; reopening " ..
-                    tostring (desired_mode) .. " backend")
-                create_backend_for_mode (gen, desired_mode)
+                  if sync_err ~= nil then
+                    log:warning ("PipeWire sync failed before encoded hotplug reclaim: " ..
+                        tostring (sync_err))
+                  end
+
+                  log:notice ("hotplug reprobe complete; reopening " ..
+                      tostring (desired_mode) .. " backend")
+                  create_backend_for_mode (gen, desired_mode)
+                end)
+                return false
               end)
               return false
-            end)
-            return false
-          end
+            end
 
-          remaining = remaining - POLL_MS
-          if remaining <= 0 then
-            log:warning ("native HDMI hotplug reprobe timed out after " ..
-                tostring (NATIVE_PROBE_TIMEOUT_MS) ..
-                " ms; resuming encoded fail-safe")
-            clear_native_probe_request ()
-            set_encoded_hardware_lock (true,
-                "native reprobe timeout; resuming " .. tostring (desired_mode))
+            remaining = remaining - POLL_MS
+            if remaining <= 0 then
+              log:warning ("native HDMI hotplug reprobe timed out after " ..
+                  tostring (NATIVE_PROBE_TIMEOUT_MS) ..
+                  " ms; resuming encoded fail-safe")
+              clear_native_probe_request ()
+              set_encoded_hardware_lock (true,
+                  "native reprobe timeout; resuming " .. tostring (desired_mode))
 
-            timer_source = Core.timeout_add (SWITCH_DELAY_MS, function ()
-              timer_source = nil
-              if gen ~= generation or not is_encoded_mode (desired_mode) then
-                set_encoded_hardware_lock (false,
-                    "reprobe timeout recovery superseded")
-                transition_finished (gen)
-                reconcile ()
+              timer_source = Core.timeout_add (SWITCH_DELAY_MS, function ()
+                timer_source = nil
+                if gen ~= generation or not is_encoded_mode (desired_mode) then
+                  set_encoded_hardware_lock (false,
+                      "reprobe timeout recovery superseded")
+                  transition_finished (gen)
+                  reconcile ()
+                  return false
+                end
+                create_backend_for_mode (gen, desired_mode)
                 return false
-              end
-              create_backend_for_mode (gen, desired_mode)
+              end)
               return false
-            end)
+            end
+
+            timer_source = Core.timeout_add (POLL_MS, wait_native_reprobe)
             return false
           end
 
           timer_source = Core.timeout_add (POLL_MS, wait_native_reprobe)
           return false
-        end
+        end)
+      end
 
-        timer_source = Core.timeout_add (POLL_MS, wait_native_reprobe)
-        return false
-      end)
+      if resume_mode == "eac3" then
+        log:notice ("hotplug reprobe: waiting for EAC3 helper SESSION release acknowledgement")
+        wait_eac3_helper_release ("hotplug reprobe", start_hotplug_release_guard)
+      else
+        start_hotplug_release_guard ()
+      end
     end)
   end)
 end
@@ -1191,6 +1352,10 @@ local function attach_default_metadata (metadata)
 
   default_metadata = metadata
   metadata_ready = true
+
+  -- Permit is owned by this policy instance. If WirePlumber was restarted in
+  -- the middle of EAC3, remove any stale commit before rebuilding the mode.
+  default_metadata:set (0, EAC3_PERMIT_KEY, nil, nil)
 
   metadata:connect ("changed", function (md, subject, key, value_type, value)
     if subject ~= 0 then

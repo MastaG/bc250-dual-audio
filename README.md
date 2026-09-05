@@ -1,4 +1,4 @@
-# BC-250 Dual Audio v0.9
+# BC-250 Dual Audio v0.10
 
 Realtime Dolby Digital / Dolby Digital Plus output modes for the AMD BC-250 on
 CachyOS, while keeping the normal HDMI/DisplayPort output completely native and
@@ -6,65 +6,92 @@ EDID/ELD-driven.
 
 Target: **CachyOS / PipeWire 1.6.x / WirePlumber 0.5.17 / AMD BC-250**.
 
-## v0.9
+## v0.10
 
-v0.9 is a focused reliability update for the E-AC-3 backend introduced in
-v0.8. It keeps the same native / AC-3 / E-AC-3 architecture and fixes the
-FIFO lifecycle observed during real mode switching.
+v0.10 fixes the E-AC-3 teardown race found during real switching tests in v0.9.
+The v0.9 FIFO lifecycle fix worked, but `ffmpeg | aplay` could remain alive for
+several seconds after WirePlumber had destroyed the EAC3 PipeWire graph. Native
+HDMI could then reopen `hw:Generic,3` too early and hit `EBUSY`.
 
-Changes:
-
-- Re-validates and re-creates `/run/user/$UID/bc250-eac3-768.pcm` before every
-  E-AC-3 backend cycle. PipeWire may unlink this FIFO when its dynamic
-  `pipe-tunnel` module is unloaded.
-- Handles FIFO open/create failures as transient lifecycle races with a bounded
-  retry instead of continuing with an invalid file descriptor.
-- Prevents the previous ENOENT / `Bad file descriptor` tight loop and the
-  resulting unnecessary CPU usage after E-AC-3 -> AC-3/native transitions.
-- Keeps the v0.8 codec names and bitrates unchanged:
-  `bc250_ac3_448` and `bc250_eac3_768`.
-- WirePlumber 0.5.17 remains the tested/rebased target.
-
-## v0.8
-
-v0.8 keeps the proven v0.7 native/AC3 arbitration and adds a second encoded
-output for **Dolby Digital Plus 5.1 (E-AC-3) at 768 kbps**.
-
-The visible encoded sinks are now named explicitly for SteamOS:
+v0.10 replaces timer-only EAC3 release assumptions with an explicit two-way
+ownership handshake:
 
 ```text
+WirePlumber                    bc250-eac3-backend
+-----------                    ------------------
+EAC3 graph synced
+     |
+     +-- create PERMIT ------> may open HDMI
+                               publish SESSION metadata
+                               start ffmpeg/aplay
+
+leave EAC3
+     |
+     +-- clear PERMIT metadata
+     +-- unload FIFO backend -> helper sees FIFO disappear
+                               terminate complete pipeline process group
+                               wait until aplay is gone
+                               clear HARDWARE metadata
+                               clear SESSION metadata
+     |
+     +-- wait SESSION gone <--- release acknowledgement
+     |
+     +-- 1000 ms guard
+     |
+     +-- native / AC3 / next EAC3 owner may start
+```
+
+The handshake uses namespaced keys in PipeWire's `default` metadata object:
+
+```text
+bc250.eac3.permit    WirePlumber commit / stop permission
+bc250.eac3.session   helper attached; release acknowledgement
+bc250.eac3.hardware  diagnostic: ffmpeg/aplay may own HDMI
+```
+
+The only runtime filesystem object is the PCM FIFO:
+
+```text
+$XDG_RUNTIME_DIR/bc250-eac3-768.pcm
+```
+
+Important v0.10 changes:
+
+- WirePlumber grants the EAC3 hardware permit only after the FIFO backend and
+  bridge are loaded, PipeWire has synced, and the requested generation is still
+  current. A cancelled transition can therefore never perform a late HDMI open.
+- WirePlumber withdraws the permit **before** tearing down the EAC3 graph.
+- The helper runs the PCM feeder, FFmpeg and `aplay` in a dedicated process
+  group and actively terminates that group as soon as the PipeWire FIFO backend
+  disappears during teardown.
+- The helper clears `bc250.eac3.session` only after the complete process group
+  is reaped, which confirms that `aplay` has closed the ALSA device.
+- WirePlumber waits for that acknowledgement before it starts the normal
+  hardware-release guard or allows native/AC3 to reclaim the physical PCM.
+- If release takes unexpectedly long, WirePlumber logs a warning after 3 s but
+  remains fail-safe and continues waiting instead of opening a competing sink.
+- The PCM relay now feeds FFmpeg in complete 1536-sample EAC3 frame blocks and
+  pads only a final short block, avoiding the previous `Invalid PCM packet`
+  message caused by a trailing 16-byte partial 5.1 F32LE sample.
+- v0.9's FIFO re-create/retry fix remains in place.
+
+## Visible outputs
+
+```text
+normal ACP HDMI/DisplayPort sink
 bc250_ac3_448
 bc250_eac3_768
 ```
 
-Their UI descriptions are:
+Descriptions:
 
 ```text
 Dolby Digital 5.1 (AC3 448 kbps)
 Dolby Digital Plus 5.1 (E-AC3 768 kbps)
 ```
 
-The original HDMI/DP output remains a normal WirePlumber ACP sink. Nothing in
-this project hard-codes its PCM layout: the connected display/receiver's ELD
-still decides whether native PCM is stereo, 5.1, 7.1, etc.
-
-## Why the two encoded modes?
-
-Use **native HDMI/DP PCM** when the complete path supports multichannel LPCM.
-That is lossless and remains the preferred mode.
-
-**AC-3 5.1 @ 448 kbps** is the compatibility mode for TVs, AVRs, soundbars,
-HDMI extractors and S/PDIF/TOSLINK-style paths that cannot transport
-multichannel LPCM but do accept classic Dolby Digital.
-
-**E-AC-3 / Dolby Digital Plus 5.1 @ 768 kbps** is intended for newer chains
-that support DD+, including many TVs that can pass DD+ to an AVR/soundbar over
-regular HDMI ARC. Support is device-dependent; eARC is not required for DD+,
-but not every ordinary ARC implementation accepts/passes an externally supplied
-DD+ stream.
-
-FFmpeg's native E-AC-3 encoder currently supports up to 5.1 for this use case;
-v0.8 therefore does **not** advertise 7.1 or Atmos/JOC.
+The native HDMI/DP sink stays fully ACP/ELD/EDID-driven; the project does not
+hard-code its PCM channel count.
 
 ## Audio paths
 
@@ -92,14 +119,17 @@ application 5.1 PCM
   -> hdmi:CARD=Generic,DEV=0,AES0=0x06
 ```
 
-For 48 kHz E-AC-3, Linux's HDMI ELD constraints map the compressed-format SAD
-to the IEC61937 transport parameters (2 channels at 192 kHz). The helper only
-opens this path when the connected ELD advertises E-AC-3/DD+. If it does not,
-the EAC3 frontend remains selectable but its PCM is consumed silently instead
-of repeatedly attempting an unsupported hardware open.
+FFmpeg's native E-AC-3 encoder is used as 5.1 only. This project does not claim
+7.1 E-AC-3 or Atmos/JOC encoding.
 
-For deliberate testing against hardware with incorrect/missing ELD reporting,
-the ELD check may be overridden with a user-service drop-in:
+## ELD behaviour
+
+By default the external EAC3 helper only opens HDMI when the connected ELD
+advertises E-AC-3 / Dolby Digital Plus. An unsupported monitor can therefore
+show `bc250_eac3_768` but will receive silence rather than a forced compressed
+bitstream.
+
+For a deliberate transport test on a monitor whose ELD does not advertise DD+:
 
 ```bash
 systemctl --user edit bc250-eac3-backend.service
@@ -112,7 +142,7 @@ Add:
 Environment=BC250_EAC3_IGNORE_ELD=1
 ```
 
-Then run:
+Then:
 
 ```bash
 systemctl --user daemon-reload
@@ -121,61 +151,26 @@ systemctl --user restart bc250-eac3-backend.service
 
 ## Global mutual exclusion
 
-The BC-250 has one physical DisplayPort audio path. Native PCM, AC-3 and E-AC-3
-therefore cannot own the HDMI PCM simultaneously.
-
-The WirePlumber policy treats output selection as a global mode:
+The BC-250 exposes one physical DisplayPort audio PCM. Output selection in
+SteamOS/KDE is therefore treated as a global mode:
 
 ```text
 native | ac3 | eac3
 ```
 
-Normal application playback and KDE/pavucontrol sink-monitor streams are forced
-to that one selected mode. Per-application splits such as Firefox -> EAC3 while
-Spotify -> native HDMI are intentionally prevented.
+Normal application streams and KDE/pavucontrol sink-monitor streams follow the
+same global target. Per-application native/AC3/EAC3 splits are intentionally
+prevented.
 
-Transitions are serialized:
-
-```text
-old backend/links stop
-  -> PipeWire sync
-  -> hardware release guard
-  -> new backend starts
-```
-
-The same v0.7 ALSA-monitor guard remains responsible for keeping the native HDMI
-node visible but safely suspended while an encoded backend owns the physical
-PCM. Hotplug/reprobe temporarily releases the encoded owner, lets ACP recreate
-and suspend native HDMI, then reclaims the selected encoded mode.
+AC3 continues to use the proven ALSA A52 path. EAC3 uses the permit/session
+handshake described above. The v0.7-derived ALSA-monitor guard keeps native HDMI
+visible but suspended while either encoded mode owns/reserves the physical PCM.
 
 ## Keepalive
 
-Both encoded frontends stay processing while selected. AC3's A52 backend and
-EAC3's FIFO/FFmpeg path therefore continue carrying encoded silence between
-application sounds, avoiding repeated Dolby lock/unlock cycles on TVs,
-soundbars and receivers.
-
-Native HDMI deliberately does **not** use this keepalive because it must be able
-to release the PCM promptly before switching to an encoded mode.
-
-## E-AC-3 backend service
-
-`bc250-eac3-backend.service` is a system-wide user unit. It is enabled for the
-Steam/Desktop user and normally consumes essentially no work: it blocks waiting
-for a FIFO writer.
-
-WirePlumber only creates that writer while `bc250_eac3_768` is selected. When
-the writer appears, the helper requires one complete 1536-sample E-AC-3 frame
-before opening HDMI, then starts FFmpeg + aplay. A cancelled/partial transition
-never opens the hardware. When WirePlumber unloads the FIFO backend, EOF tears
-down the pipeline and releases HDMI before the normal 1000 ms hardware guard
-expires.
-
-Helper logs:
-
-```bash
-journalctl --user -u bc250-eac3-backend -f
-```
+Both encoded frontends stay processing while selected so downstream receivers
+can keep their Dolby lock between application sounds. Native HDMI remains
+suspendable because it must release the hardware before an encoded mode starts.
 
 ## Files
 
@@ -190,81 +185,85 @@ journalctl --user -u bc250-eac3-backend -f
 ```
 
 The custom `monitors/alsa.lua` remains a downstream patch rebased on stock
-WirePlumber **0.5.17**. The installer checks both the WirePlumber version and
-the known stock script SHA256 before installing the shadow override. No package
-file under `/usr/share` is overwritten.
+WirePlumber **0.5.17**. The installer verifies the WirePlumber version and the
+known stock script SHA256 before installing the `/usr/local` shadow override;
+it does not overwrite `/usr/share/wireplumber/...`.
 
 ## Dependencies
 
-The installer verifies:
+The installer checks for:
 
-- WirePlumber 0.5.17 (unless intentionally overridden)
-- PipeWire's `libpipewire-module-pipe-tunnel`
+- WirePlumber 0.5.17 (unless deliberately overridden)
+- PipeWire `libpipewire-module-pipe-tunnel`
 - ALSA `aplay`
-- FFmpeg with the native `eac3` encoder
-- FFmpeg's `spdif` / IEC61937 muxer
+- FFmpeg with `eac3` encoder and `spdif`/IEC61937 muxer
+- util-linux `setsid`
 
 ## Install / upgrade
 
-Run as the normal Steam/Desktop user, **not** with sudo:
+Run as the normal Steam/Desktop user, not with sudo:
 
 ```bash
 ./install.sh
 ```
 
-The installer calls sudo for `/etc` and `/usr/local`, enables the EAC3 user
-service, restarts the audio stack and creates a rollback snapshot.
+The installer calls sudo for system-wide custom files, enables/restarts the EAC3
+user service, restarts PipeWire/WirePlumber and stores a rollback snapshot.
+Reboot once before the final Steam Gaming Mode regression test.
 
-If upgrading from v0.7 while the old `bc250_ac3` sink is the configured default,
-the installer automatically migrates that preference to `bc250_ac3_448`.
-
-Reboot once after installation before judging Steam Gaming Mode behaviour.
-
-## Basic check
+## Basic test
 
 ```bash
 ./check.sh
 ```
 
-Expected visible sinks:
+Then repeatedly test:
 
 ```text
-bc250_ac3_448
-bc250_eac3_768
-alsa_output.pci-0000_01_00.1.hdmi-...
+native -> EAC3 -> native
+AC3 -> EAC3 -> AC3
+EAC3 -> AC3 -> EAC3
 ```
 
-Check for the hardware race that this project is designed to avoid:
+For an EAC3 -> native handover, the intended log order is now:
+
+```text
+EAC3 hardware permit withdrawn
+unloading eac3 bridge
+...
+EAC3 backend graph gone; waiting for helper SESSION release acknowledgement
+...
+bc250-eac3-backend: stopping E-AC-3 pipeline (PipeWire FIFO backend disappeared)
+bc250-eac3-backend: hardware release acknowledged
+...
+EAC3 helper release acknowledged
+1000 ms hardware guard after release acknowledgement
+encoded hardware lock -> false
+native mode READY
+```
+
+This check should remain empty:
 
 ```bash
 journalctl --user -u pipewire --since "10 minutes ago" --no-pager | \
   grep -Ei 'busy|EBUSY|playback open failed|Start error'
 ```
 
-Expected: no output.
-
-Follow the policy live:
+Follow the two cooperating sides live with:
 
 ```bash
 journalctl --user -u wireplumber -f | \
-  grep --line-buffered -E 'BC-250|A52|AC3|EAC3|encoded|reprobe|s-bc250-audio'
+  grep --line-buffered -E 'BC-250|AC3|EAC3|permit|SESSION|acknowledged|reprobe'
 ```
 
-For EAC3 also follow:
+and:
 
 ```bash
 journalctl --user -u bc250-eac3-backend -f
 ```
-
-If the current display does not advertise DD+, selecting `bc250_eac3_768` will
-not intentionally send a compressed bitstream to it. Test actual DD+ output on
-a TV/AVR/soundbar chain whose ELD advertises E-AC-3/DD+.
 
 ## Rollback
 
 ```bash
 ./rollback.sh
 ```
-
-The rollback stops/disables the EAC3 helper, restores the files backed up by the
-most recent installer run and restarts PipeWire/WirePlumber.
