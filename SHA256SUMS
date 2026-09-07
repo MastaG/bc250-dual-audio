@@ -8,7 +8,7 @@ c38f6d416bd314ab22921f659ac9f42791487d900384beb5e826ca75e682a2d1  ./etc/pipewire
 02baceec8e8ec7f0944d2b46f9268dbece5a33ff62c46e1c8a72e793955585f1  ./etc/systemd/user/bc250-eac3-backend.service
 eba06ba55e6ca9996621d900e8853efe0c23370b512aeb51dca58a246adc3219  ./etc/wireplumber/wireplumber.conf.d/50-bc250-audio.conf
 3211f35b4d0ab657cb67f86f17e70bb3a2474f18060bc5d72c5e2b10c703049c  ./install.sh
-8d37c75e6c5cb4ed25f1caffecbdb0b50c77079a5b67d15f0bf273e563882e6c  ./README.md
+d6a25b1060f90fadb9d2423160fcbc6393d25490afab839809c08ad2f4f34f45  ./README.md
 f5ef4a7546c53781685e8c211f05e4802c993e01b085b9d70b21586c59b5a0cf  ./rollback.sh
 f676f14089a300806f819c839682415452601c63d98fe3c2ededed59ae4dfdbb  ./usr/local/libexec/bc250-eac3-backend
 11081b9f282f36d5b5e14b4aae13661259cba6d088c70056016afea23e9846fc  ./usr/local/libexec/bc250-pipe-size

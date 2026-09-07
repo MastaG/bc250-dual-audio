@@ -134,7 +134,12 @@ audibly. `BC250_EAC3_PIPE_BYTES` is the second lever, and its floor is one page
 Then `systemctl --user daemon-reload && systemctl --user restart bc250-eac3-backend.service`.
 The startup log line echoes the active bitrate, so you can confirm it took.
 
-**AC-3** — bitrate lives in `/etc/alsa/conf.d/61-bc250-a52.conf`. To send without
+**AC-3** — bitrate lives in `/etc/alsa/conf.d/61-bc250-a52.conf` as a plain
+`bitrate` value; edit it there and restart WirePlumber. There is deliberately no
+environment variable for it: AC-3 is encoded inside ALSA by the PipeWire daemon,
+so unlike the E-AC-3 backend there is no process of ours to pass one to.
+**640 is AC-3's ceiling** — it is the top of the codec's frame-size table, so
+do not copy E-AC-3's 768 here. To send without
 the IEC61937 non-audio bit, point `ac3-alsa-path` at the fallback PCM in
 `/etc/wireplumber/wireplumber.conf.d/50-bc250-audio.conf`:
 
