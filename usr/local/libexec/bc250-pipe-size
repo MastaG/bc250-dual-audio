@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Shrink kernel pipe buffers, then exec the real command.
+
+Latency through the E-AC-3 chain is the sum of every buffer in it, because all
+of them fill during startup and nothing ever drains them again. A Linux pipe
+defaults to 64 KiB, which at this chain's data rates is 57 ms on the 5.1 F32LE
+side and 85 ms on the IEC61937 side -- around 200 ms across the three pipes,
+which is more than the ALSA buffer once that is sized sensibly.
+
+Only F_SETPIPE_SZ can change that and the shell cannot call it, so this helper
+sets the size on the file descriptors it is given and then execs the real
+program. Wrapping ffmpeg covers both pipes around it: fd 0 is the feeder pipe
+and fd 1 is the pipe into aplay.
+
+    bc250-pipe-size <bytes> <command> [args...]   size fds 0 and 1, then exec
+    bc250-pipe-size --fd N <bytes>                size one inherited fd, exit
+
+Failure is never fatal: the kernel clamps the size to a page, refuses sizes
+below the data already buffered, and may deny growth beyond
+/proc/sys/fs/pipe-max-size for unprivileged callers. In every such case the
+pipe keeps its previous capacity, which only costs latency.
+"""
+
+import errno
+import fcntl
+import os
+import stat
+import sys
+
+# Not exposed by the fcntl module; from <linux/fcntl.h>.
+F_SETPIPE_SZ = 1031
+
+
+# A pipe cannot be shrunk below the data already sitting in it: F_SETPIPE_SZ
+# returns EBUSY. That is not hypothetical here -- the feeder writes a 36 KiB
+# prebuffer as soon as the pipeline starts, so a 16 KiB request on the feeder
+# pipe races it and usually loses. Rather than give up and keep the full 64 KiB,
+# double the request until one is accepted, so the pipe still ends up as small
+# as it can be at that moment.
+MAX_ATTEMPT_BYTES = 1 << 20
+
+
+def resize(fd, size):
+    """Shrink a pipe as far as the kernel allows. Returns the capacity, or None."""
+    try:
+        if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+            return None
+    except OSError:
+        return None
+
+    attempt = size
+    while attempt <= MAX_ATTEMPT_BYTES:
+        try:
+            return fcntl.fcntl(fd, F_SETPIPE_SZ, attempt)
+        except OSError as exc:
+            if exc.errno != errno.EBUSY:
+                print(
+                    "bc250-pipe-size: could not resize fd %d to %d (%s); "
+                    "keeping the default capacity" % (fd, attempt, exc.strerror),
+                    file=sys.stderr,
+                )
+                return None
+            attempt *= 2
+    return None
+
+
+def main(argv):
+    if len(argv) >= 4 and argv[1] == "--fd":
+        resize(int(argv[2]), int(argv[3]))
+        return 0
+
+    if len(argv) < 3:
+        print(__doc__, file=sys.stderr)
+        return 2
+
+    size = int(argv[1])
+    for fd in (0, 1):
+        resize(fd, size)
+
+    os.execvp(argv[2], argv[2:])
+    return 127  # execvp only returns on failure, and it raises instead
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

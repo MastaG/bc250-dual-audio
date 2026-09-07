@@ -6,6 +6,39 @@ Versions before v0.8 predate this file; v0.5-v0.7 built the native/AC-3
 arbitration, the configured-default authority, the hardware lock and reprobe
 logic, and the KDE monitor-stream guard that the current design still rests on.
 
+## v0.13
+
+Cuts E-AC-3 latency and drops the bitrate from the sink names.
+
+**E-AC-3 was carrying roughly 780 ms of buffering.** Latency through that path
+is the sum of every buffer in the chain, because they all fill during startup
+and nothing drains them again. Measured on hardware, `aplay` alone held a
+501 ms ALSA buffer -- its 500 ms default, which the pipeline never overrode --
+and each of the three kernel pipes contributed a further 57-85 ms at their
+default 64 KiB.
+
+- `aplay` now runs with an explicit `--buffer-time` (64 ms) and `--period-time`
+  (16 ms), tunable via `BC250_EAC3_BUFFER_TIME_US` / `BC250_EAC3_PERIOD_TIME_US`.
+  Raise the buffer first if the sink stutters.
+- New `bc250-pipe-size` helper sets `F_SETPIPE_SZ` on the pipes and execs the
+  real command; the shell cannot make that call itself. Wrapping FFmpeg sizes
+  both pipes around it, and the FIFO is sized from the reader end. Default
+  16 KiB, tunable via `BC250_EAC3_PIPE_BYTES`. This adds a `python` dependency.
+- FFmpeg gains `-fflags nobuffer -flags low_delay -probesize 32
+  -analyzeduration 0`, which mainly removes startup probing.
+- Together these take the chain to roughly 200 ms. The remaining floor is the
+  32 ms encoder frame, the 32 ms prebuffer that detects a cancelled transition,
+  and PipeWire's own graph latency.
+
+AC-3 is unchanged: it encodes inside PipeWire via the ALSA `a52` plugin, so it
+was already near its floor of the quantum plus one 32 ms AC-3 frame.
+
+**Sinks renamed** `bc250_ac3_448` -> `bc250_ac3` and `bc250_eac3_768` ->
+`bc250_eac3`. The bitrates became configurable in v0.12, so a name asserting one
+stops being true as soon as it is changed; the descriptions lost their bitrates
+for the same reason. `install.sh` migrates a saved configured default across,
+but a per-application output pinned to an old name has to be picked again.
+
 ## v0.12
 
 v0.12 changes two things: it stops checking sink capabilities entirely, and it

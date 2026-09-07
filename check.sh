@@ -2,7 +2,7 @@
 set -u
 
 RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
-FIFO="$RUNTIME_DIR/bc250-eac3-768.pcm"
+FIFO="$RUNTIME_DIR/bc250-eac3.pcm"
 PERMIT_KEY="bc250.eac3.permit"
 SESSION_KEY="bc250.eac3.session"
 HARDWARE_KEY="bc250.eac3.hardware"

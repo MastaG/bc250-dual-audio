@@ -25,8 +25,8 @@ disappearing sink, or silence).
 | Output | Shows up as | What it is | Use it when |
 |---|---|---|---|
 | **Native** | `alsa_output.pci-…hdmi-…` | Stock PipeWire HDMI/DP sink, untouched | Your display/receiver accepts multichannel LPCM. Lossless — always prefer this. |
-| **AC-3** | `bc250_ac3_448` | Dolby Digital 5.1 @ 448 kbps, encoded live | The chain can't take multichannel LPCM but decodes Dolby Digital. Widest compatibility. |
-| **E-AC-3** | `bc250_eac3_768` | Dolby Digital Plus 5.1 @ 768 kbps, encoded live | The chain supports DD+. Higher bitrate ceiling than AC-3 can reach. |
+| **AC-3** | `bc250_ac3` | Dolby Digital 5.1, encoded live (448 kbps default) | The chain can't take multichannel LPCM but decodes Dolby Digital. Widest compatibility. |
+| **E-AC-3** | `bc250_eac3` | Dolby Digital Plus 5.1, encoded live (768 kbps default) | The chain supports DD+. Higher bitrate ceiling than AC-3 can reach. |
 
 Selecting one is just picking the output in Steam, KDE, `pavucontrol` or
 `wpctl` — no special tooling. The choice is **global**: every application
@@ -65,6 +65,7 @@ judging results in Steam Gaming Mode.
 - PipeWire with `libpipewire-module-pipe-tunnel`
 - FFmpeg with the `eac3` encoder and the `spdif` (IEC61937) muxer
 - `alsa-plugins` (the a52 encoder), `alsa-utils` (`aplay`), `util-linux` (`setsid`)
+- `python` — used only to shrink kernel pipe buffers on the E-AC-3 path
 
 ## Check that it works
 
@@ -117,9 +118,18 @@ to, nothing requires editing code.
 
 ```ini
 [Service]
-Environment=BC250_EAC3_BITRATE=1024k   # default 768k
-Environment=BC250_ENCODED_AES0=0x04    # default 0x06 (non-audio bit set)
+Environment=BC250_EAC3_BITRATE=1024k          # default 768k
+Environment=BC250_ENCODED_AES0=0x04           # default 0x06 (non-audio bit set)
+Environment=BC250_EAC3_BUFFER_TIME_US=96000   # ALSA buffer, default 64000 (64 ms)
+Environment=BC250_EAC3_PERIOD_TIME_US=24000   # ALSA period, default 16000 (16 ms)
+Environment=BC250_EAC3_PIPE_BYTES=32768       # kernel pipe size, default 16384
 ```
+
+**If E-AC-3 stutters or crackles, raise `BC250_EAC3_BUFFER_TIME_US` first** (try
+96000, then 128000). A small ALSA buffer is what makes the path responsive, but
+the encoder pipeline is not realtime-scheduled, so too small a buffer underruns
+audibly. `BC250_EAC3_PIPE_BYTES` is the second lever, and its floor is one page
+(4096).
 
 Then `systemctl --user daemon-reload && systemctl --user restart bc250-eac3-backend.service`.
 The startup log line echoes the active bitrate, so you can confirm it took.
@@ -134,14 +144,44 @@ ac3-alsa-path = "plug:bc250_a52_noaes"
 
 then restart WirePlumber.
 
-> `bc250_ac3_448` and `bc250_eac3_768` are stable identifiers, not claims.
-> Changing a bitrate does not rename the sinks — renaming them would reset every
-> saved output selection.
+> The sinks are named `bc250_ac3` and `bc250_eac3`, with no bitrate in the name,
+> because the bitrates are configurable and a name like `bc250_eac3_768` stops
+> being true the moment you change one. v0.13 renamed them from the older
+> `bc250_ac3_448` / `bc250_eac3_768`; `install.sh` carries a saved default
+> across, but if you had pinned an output per application you may need to pick
+> it again.
 
 > If you hand-edit any file under `/etc`, note they are in the package's
 > `backup=` set: pacman will **preserve your version and write `.pacnew`**
 > instead of applying updates. Merge them, or your edits will silently block
 > future fixes.
+
+## Latency
+
+AC-3 encodes *inside* PipeWire through the ALSA `a52` plugin, so PipeWire's own
+quantum governs it — roughly 20–40 ms plus the 32 ms AC-3 frame, which is the
+codec's own frame size and cannot be removed. AC-3 is close to its floor.
+
+E-AC-3 runs through an external process, and latency there is the **sum of every
+buffer in the chain**: they all fill during startup and nothing drains them
+again. Before v0.13 those defaults added up to roughly 780 ms, with `aplay`'s
+default 500 ms ALSA buffer alone accounting for two thirds of it.
+
+v0.13 sizes them explicitly:
+
+| stage | before | after |
+|---|---|---|
+| FIFO (kernel pipe) | ~57 ms | ~14 ms |
+| prebuffer (1 E-AC-3 frame) | 32 ms | 32 ms |
+| feeder pipe into FFmpeg | ~57 ms | ~14 ms |
+| E-AC-3 encoder frame | 32 ms | 32 ms |
+| pipe into `aplay` | ~85 ms | ~21 ms |
+| `aplay` ALSA buffer | ~500 ms | 64 ms |
+
+The remaining floor is the 32 ms encoder frame, the 32 ms prebuffer that exists
+to detect a cancelled transition, and PipeWire's own graph latency. 64 ms of
+*encoding* is reachable — two frames — but 64 ms end-to-end is not without
+collapsing the process chain entirely.
 
 ## No capability checks — on purpose
 
@@ -181,6 +221,7 @@ installed it.
 /etc/pipewire/pipewire.conf.d/60-bc250-ac3-output.conf    the two virtual sinks
 /etc/wireplumber/wireplumber.conf.d/50-bc250-audio.conf   policy settings
 /usr/local/libexec/bc250-eac3-backend                     E-AC-3 encoder
+/usr/local/libexec/bc250-pipe-size                        pipe-buffer sizer
 /usr/local/share/wireplumber/scripts/monitors/alsa.lua    patched ALSA monitor
 ```
 

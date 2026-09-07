@@ -1,11 +1,11 @@
 -- BC-250 global native-HDMI / realtime Dolby encoder arbiter
 -- Target: WirePlumber 0.5.17
--- BC-250 policy revision: v0.12
+-- BC-250 policy revision: v0.13
 --
 -- User-visible model:
 --   * stock/native HDMI/DP sink (ACP, EDID/ELD driven)
---   * bc250_ac3_448: permanent virtual AC-3 5.1 frontend
---   * bc250_eac3_768: permanent virtual E-AC-3 / DD+ 5.1 frontend
+--   * bc250_ac3: permanent virtual AC-3 5.1 frontend
+--   * bc250_eac3: permanent virtual E-AC-3 / DD+ 5.1 frontend
 --
 -- Hardware model:
 --   * native ACP, hidden A52 and hidden E-AC-3/IEC61937 backends all
@@ -30,13 +30,13 @@ local cfg = Conf.get_section_as_properties ("bc250.audio.properties")
 
 local NATIVE_PREFIX = cfg["native-node-prefix"] or
     "alsa_output.pci-0000_01_00.1.hdmi-"
-local AC3_FRONTEND = cfg["ac3-frontend-node"] or "bc250_ac3_448"
-local AC3_BACKEND_NAME = cfg["ac3-backend-node"] or "bc250_ac3_448_backend"
+local AC3_FRONTEND = cfg["ac3-frontend-node"] or "bc250_ac3"
+local AC3_BACKEND_NAME = cfg["ac3-backend-node"] or "bc250_ac3_backend"
 local A52_PATH = cfg["ac3-alsa-path"] or "plug:bc250_a52"
-local EAC3_FRONTEND = cfg["eac3-frontend-node"] or "bc250_eac3_768"
+local EAC3_FRONTEND = cfg["eac3-frontend-node"] or "bc250_eac3"
 local EAC3_PIPE_BACKEND_NAME = cfg["eac3-pipe-backend-node"] or
-    "bc250_eac3_768_pipe_backend"
-local EAC3_FIFO_NAME = cfg["eac3-fifo-name"] or "bc250-eac3-768.pcm"
+    "bc250_eac3_pipe_backend"
+local EAC3_FIFO_NAME = cfg["eac3-fifo-name"] or "bc250-eac3.pcm"
 local XDG_RUNTIME_DIR = os.getenv ("XDG_RUNTIME_DIR") or "/tmp"
 local EAC3_FIFO = XDG_RUNTIME_DIR .. "/" .. EAC3_FIFO_NAME
 local EAC3_PERMIT_KEY = cfg["eac3-permit-key"] or "bc250.eac3.permit"
@@ -465,9 +465,9 @@ local function create_encoded_bridge (gen, mode, frontend, backend_name)
 
     local function finish_ready ()
       if mode == "ac3" then
-        log:notice ("AC3 mode READY: bc250_ac3_448 -> A52 448 kbps -> hw:Generic,3")
+        log:notice ("AC3 mode READY: bc250_ac3 -> A52 448 kbps -> hw:Generic,3")
       else
-        log:notice ("EAC3 mode READY: bc250_eac3_768 -> PCM FIFO -> " ..
+        log:notice ("EAC3 mode READY: bc250_eac3 -> PCM FIFO -> " ..
             "FFmpeg E-AC-3 768 kbps -> IEC61937 -> HDMI")
       end
 

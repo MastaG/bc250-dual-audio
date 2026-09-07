@@ -60,7 +60,7 @@ lock in the gaps and clip the start of the next sound.
 
 ```text
 application 5.1 PCM
-  → bc250_ac3_448              null-sink, visible in the UI
+  → bc250_ac3              null-sink, visible in the UI
   → hidden A52 backend          created only while AC-3 is selected
   → ALSA a52 plugin             encodes to AC-3 5.1 @ 448 kbps
   → hdmi:CARD=Generic,DEV=0     with IEC61937 channel status
@@ -84,9 +84,9 @@ selectable for receivers that turn out to prefer the old behaviour.
 
 ```text
 application 5.1 PCM
-  → bc250_eac3_768                       null-sink, visible in the UI
+  → bc250_eac3                       null-sink, visible in the UI
   → hidden pipe-tunnel backend           writes PCM into a FIFO
-  → $XDG_RUNTIME_DIR/bc250-eac3-768.pcm
+  → $XDG_RUNTIME_DIR/bc250-eac3.pcm
   → bc250-eac3-backend.service           separate always-resident process
   → ffmpeg -c:a eac3 -b:a 768k
   → IEC61937 framing (-f spdif)

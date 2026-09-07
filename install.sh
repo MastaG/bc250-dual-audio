@@ -11,7 +11,7 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP="$HOME/.local/state/bc250-audio-backup/$STAMP"
 mkdir -p "$BACKUP/user" "$BACKUP/system"
 
-echo "BC-250 Dual Audio v0.12 installer"
+echo "BC-250 Dual Audio v0.13 installer"
 echo "Native HDMI/DP + AC3 448 kbps + E-AC3 768 kbps"
 echo "Backup: $BACKUP"
 
@@ -33,7 +33,7 @@ fi
 if [[ -f "$STOCK_ALSA" && "${BC250_ALLOW_UNTESTED_WP:-0}" != "1" ]]; then
   STOCK_ALSA_SHA256=$(sha256sum "$STOCK_ALSA" | awk '{print $1}')
   if [[ "$STOCK_ALSA_SHA256" != "$EXPECTED_STOCK_ALSA_SHA256" ]]; then
-    echo "ERROR: distro stock alsa.lua does not match the WirePlumber 0.5.17 base used by v0.12." >&2
+    echo "ERROR: distro stock alsa.lua does not match the WirePlumber 0.5.17 base used by v0.13." >&2
     echo "Expected: $EXPECTED_STOCK_ALSA_SHA256" >&2
     echo "Found:    $STOCK_ALSA_SHA256" >&2
     echo "Refusing to install a full monitor shadow override onto an unknown base." >&2
@@ -42,7 +42,7 @@ if [[ -f "$STOCK_ALSA" && "${BC250_ALLOW_UNTESTED_WP:-0}" != "1" ]]; then
   fi
 fi
 
-for cmd in ffmpeg aplay pactl wpctl pw-metadata mkfifo dd sha256sum grep tr stat setsid; do
+for cmd in ffmpeg aplay pactl wpctl pw-metadata mkfifo dd sha256sum grep tr stat setsid python3; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "ERROR: required command not found: $cmd" >&2
     exit 4
@@ -67,10 +67,17 @@ fi
 OLD_CONFIGURED_SINK=$(pw-metadata -n default 0 2>/dev/null | \
   sed -n 's/.*default\.configured\.audio\.sink.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
   head -1 || true)
-MIGRATE_LEGACY_AC3=0
-if [[ "$OLD_CONFIGURED_SINK" == "bc250_ac3" ]]; then
-  MIGRATE_LEGACY_AC3=1
-  echo "Will migrate configured default bc250_ac3 -> bc250_ac3_448"
+# v0.13 dropped the bitrate from the sink names, because the bitrates became
+# configurable and a name like bc250_eac3_768 stops being true the moment you
+# change one. A saved default pointing at an old name would silently stop
+# resolving, so carry it across.
+MIGRATE_TO_SINK=""
+case "$OLD_CONFIGURED_SINK" in
+  bc250_ac3_448)  MIGRATE_TO_SINK=bc250_ac3 ;;
+  bc250_eac3_768) MIGRATE_TO_SINK=bc250_eac3 ;;
+esac
+if [[ -n "$MIGRATE_TO_SINK" ]]; then
+  echo "Will migrate configured default $OLD_CONFIGURED_SINK -> $MIGRATE_TO_SINK"
 fi
 
 backup_user_file() {
@@ -94,7 +101,7 @@ backup_system_file() {
   fi
 }
 
-# Back up both old prototype files and all host-wide files replaced by v0.12.
+# Back up both old prototype files and all host-wide files replaced by v0.13.
 backup_user_file "$HOME/.config/wireplumber/wireplumber.conf.d/50-bc250-ac3.conf" "user-50-bc250-ac3.conf"
 backup_user_file "$HOME/.local/share/wireplumber/scripts/monitors/alsa.lua" "user-alsa.lua"
 backup_user_file "$HOME/.config/pipewire/pipewire.conf.d/ac3-sink.conf" "user-ac3-sink.conf"
@@ -106,6 +113,7 @@ backup_system_file "/etc/wireplumber/wireplumber.conf.d/50-bc250-audio.conf" "sy
 backup_system_file "/usr/local/share/wireplumber/scripts/90-bc250-audio-mode.lua" "system-90-bc250-audio-mode.lua"
 backup_system_file "/usr/local/share/wireplumber/scripts/monitors/alsa.lua" "system-alsa.lua"
 backup_system_file "/usr/local/libexec/bc250-eac3-backend" "system-bc250-eac3-backend"
+backup_system_file "/usr/local/libexec/bc250-pipe-size" "system-bc250-pipe-size"
 backup_system_file "/etc/systemd/user/bc250-eac3-backend.service" "system-bc250-eac3-backend.service"
 
 echo "$BACKUP" > "$HOME/.local/state/bc250-audio-last-backup"
@@ -138,6 +146,8 @@ sudo install -m 0644 "$ROOT_DIR/usr/local/share/wireplumber/scripts/monitors/als
   /usr/local/share/wireplumber/scripts/monitors/alsa.lua
 sudo install -m 0755 "$ROOT_DIR/usr/local/libexec/bc250-eac3-backend" \
   /usr/local/libexec/bc250-eac3-backend
+sudo install -m 0755 "$ROOT_DIR/usr/local/libexec/bc250-pipe-size" \
+  /usr/local/libexec/bc250-pipe-size
 sudo install -m 0644 "$ROOT_DIR/etc/systemd/user/bc250-eac3-backend.service" \
   /etc/systemd/user/bc250-eac3-backend.service
 
@@ -152,23 +162,26 @@ echo "Installed. Restarting the user audio stack..."
 systemctl --user restart pipewire pipewire-pulse wireplumber
 sleep 4
 
-if (( MIGRATE_LEGACY_AC3 )); then
+if [[ -n "$MIGRATE_TO_SINK" ]]; then
   # wpctl needs a PipeWire node ID; a pactl sink index is a different namespace
   # and is not safe to pass to wpctl. Parse the actual ID from wpctl status.
-  NEW_AC3_ID=$(wpctl status -n 2>/dev/null | awk '
-    $0 ~ /bc250_ac3_448/ {
+  # Anchor on an exact name match so bc250_ac3 cannot pick up bc250_eac3.
+  NEW_SINK_ID=$(wpctl status -n 2>/dev/null | awk -v want="$MIGRATE_TO_SINK" '
+    {
       for (i = 1; i <= NF; i++) {
-        if ($i ~ /^[0-9]+\.$/) {
-          gsub(/\./, "", $i); print $i; exit
+        if ($i == want) {
+          for (j = 1; j < i; j++) {
+            if ($j ~ /^[0-9]+\.$/) { gsub(/\./, "", $j); print $j; exit }
+          }
         }
       }
     }')
-  if [[ -n "${NEW_AC3_ID:-}" ]]; then
-    wpctl set-default "$NEW_AC3_ID"
-    echo "Migrated configured default to bc250_ac3_448 (PipeWire node $NEW_AC3_ID)"
+  if [[ -n "${NEW_SINK_ID:-}" ]]; then
+    wpctl set-default "$NEW_SINK_ID"
+    echo "Migrated configured default to $MIGRATE_TO_SINK (PipeWire node $NEW_SINK_ID)"
     sleep 2
   else
-    echo "WARNING: could not find the PipeWire node ID for bc250_ac3_448; old default was not migrated." >&2
+    echo "WARNING: could not find the PipeWire node ID for $MIGRATE_TO_SINK; old default was not migrated." >&2
   fi
 fi
 

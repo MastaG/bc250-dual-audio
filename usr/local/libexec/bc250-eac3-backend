@@ -22,8 +22,8 @@
 set -u -o pipefail
 
 RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
-FIFO=${BC250_EAC3_FIFO:-$RUNTIME_DIR/bc250-eac3-768.pcm}
-PREBUFFER=$RUNTIME_DIR/bc250-eac3-768.prebuffer.$$
+FIFO=${BC250_EAC3_FIFO:-$RUNTIME_DIR/bc250-eac3.pcm}
+PREBUFFER=$RUNTIME_DIR/bc250-eac3.prebuffer.$$
 FRAME_BYTES=$((1536 * 6 * 4))  # one 32 ms E-AC-3 frame: F32LE, 48 kHz, 5.1
 # IEC61937 channel-status byte 0. 0x06 sets the non-audio bit, which is what
 # tells a receiver to decode the stream as Dolby rather than play it as PCM.
@@ -35,6 +35,16 @@ HDMI_DEVICE=${BC250_EAC3_ALSA_DEVICE:-hdmi:CARD=Generic,DEV=0,AES0=$ENCODED_AES0
 # tracks bitrate rather than codec generation. 768k is a common DD+ 5.1 rate and
 # exceeds AC-3's 640k ceiling, which is the only real gain this path offers.
 EAC3_BITRATE=${BC250_EAC3_BITRATE:-768k}
+# Latency through this chain is the sum of every buffer in it: they all fill
+# during startup and nothing drains them again. aplay defaults to a 500 ms ALSA
+# buffer, and each kernel pipe defaults to 64 KiB, which is 57 ms of 5.1 F32LE
+# or 85 ms of IEC61937. Sizing both down is what makes E-AC-3 feel responsive.
+# Raise BC250_EAC3_BUFFER_TIME_US first if the sink stutters: too small an ALSA
+# buffer underruns audibly, and the encoder pipeline is not realtime-scheduled.
+EAC3_BUFFER_TIME_US=${BC250_EAC3_BUFFER_TIME_US:-64000}
+EAC3_PERIOD_TIME_US=${BC250_EAC3_PERIOD_TIME_US:-16000}
+EAC3_PIPE_BYTES=${BC250_EAC3_PIPE_BYTES:-16384}
+PIPE_SIZER=${BC250_EAC3_PIPE_SIZER:-/usr/local/libexec/bc250-pipe-size}
 METADATA_NAME=${BC250_EAC3_METADATA_NAME:-default}
 PERMIT_KEY=${BC250_EAC3_PERMIT_KEY:-bc250.eac3.permit}
 SESSION_KEY=${BC250_EAC3_SESSION_KEY:-bc250.eac3.session}
@@ -239,21 +249,34 @@ start_pipeline() {
     export BC250_EAC3_CHILD_FRAME_BYTES="$FRAME_BYTES"
     export BC250_EAC3_CHILD_HDMI_DEVICE="$HDMI_DEVICE"
     export BC250_EAC3_CHILD_BITRATE="$EAC3_BITRATE"
+    export BC250_EAC3_CHILD_BUFFER_TIME_US="$EAC3_BUFFER_TIME_US"
+    export BC250_EAC3_CHILD_PERIOD_TIME_US="$EAC3_PERIOD_TIME_US"
+    # Wrapping ffmpeg sizes both pipes around it in one go: fd 0 is the feeder
+    # and fd 1 is the pipe into aplay. Unset if the helper is missing, so the
+    # pipeline degrades to default pipe sizes rather than failing to start.
+    if [[ -x "$PIPE_SIZER" ]]; then
+        export BC250_EAC3_CHILD_PIPE_WRAP="$PIPE_SIZER $EAC3_PIPE_BYTES"
+    else
+        export BC250_EAC3_CHILD_PIPE_WRAP=""
+    fi
 
     # Read only complete EAC3-frame-sized PCM blocks after the prebuffer.
     # conv=sync pads a final short EOF block instead of exposing a partial 5.1
     # F32LE sample to FFmpeg during teardown.
     setsid bash -c '
-        {
-            cat "$BC250_EAC3_CHILD_PREBUFFER"
-            dd iflag=fullblock bs="$BC250_EAC3_CHILD_FRAME_BYTES" conv=sync status=none <&3
-        } | ffmpeg \
+        $BC250_EAC3_CHILD_PIPE_WRAP bash -c "
+            cat \"\$BC250_EAC3_CHILD_PREBUFFER\"
+            dd iflag=fullblock bs=\"\$BC250_EAC3_CHILD_FRAME_BYTES\" conv=sync status=none <&3
+        " | $BC250_EAC3_CHILD_PIPE_WRAP ffmpeg \
             -nostdin -hide_banner -loglevel warning \
+            -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
             -f f32le -ar 48000 -ac 6 -i pipe:0 \
             -filter:a "pan=5.1|FL=c0|FR=c1|FC=c4|LFE=c5|BL=c2|BR=c3" \
             -c:a eac3 -b:a "$BC250_EAC3_CHILD_BITRATE" -ar 48000 -ac 6 \
             -flush_packets 1 -f spdif pipe:1 | \
-            aplay -D "$BC250_EAC3_CHILD_HDMI_DEVICE" -t raw -f S16_LE -c 2 -r 192000
+            aplay -D "$BC250_EAC3_CHILD_HDMI_DEVICE" -t raw -f S16_LE -c 2 -r 192000 \
+                  --buffer-time="$BC250_EAC3_CHILD_BUFFER_TIME_US" \
+                  --period-time="$BC250_EAC3_CHILD_PERIOD_TIME_US"
     ' &
     PIPELINE_PID=$!
 
@@ -282,6 +305,12 @@ while true; do
         log "failed to open FIFO for reading: $FIFO"
         sleep 0.1
         continue
+    fi
+
+    # Shrink the FIFO now that we hold the read end. Left at the default 64 KiB
+    # it contributes ~57 ms of standing latency once the chain backs up.
+    if [[ -x "$PIPE_SIZER" ]]; then
+        "$PIPE_SIZER" --fd 3 "$EAC3_PIPE_BYTES" 3<&3 || true
     fi
 
     # SESSION is the helper -> WirePlumber release acknowledgement. Publish it
@@ -325,7 +354,8 @@ while true; do
         continue
     fi
 
-    log "starting E-AC-3 5.1 @ $EAC3_BITRATE -> IEC61937 -> $HDMI_DEVICE"
+    log "starting E-AC-3 5.1 @ $EAC3_BITRATE -> IEC61937 -> $HDMI_DEVICE" \
+        "(alsa buffer ${EAC3_BUFFER_TIME_US}us / period ${EAC3_PERIOD_TIME_US}us, pipes ${EAC3_PIPE_BYTES}B)"
 
     if ! start_pipeline; then
         log "failed to start E-AC-3 pipeline"

@@ -30,6 +30,7 @@ sudo rm -f /etc/wireplumber/wireplumber.conf.d/50-bc250-audio.conf
 sudo rm -f /usr/local/share/wireplumber/scripts/90-bc250-audio-mode.lua
 sudo rm -f /usr/local/share/wireplumber/scripts/monitors/alsa.lua
 sudo rm -f /usr/local/libexec/bc250-eac3-backend
+sudo rm -f /usr/local/libexec/bc250-pipe-size
 sudo rm -f /etc/systemd/user/bc250-eac3-backend.service
 
 restore_user() {
@@ -61,6 +62,7 @@ restore_system "system-50-bc250-audio.conf" "/etc/wireplumber/wireplumber.conf.d
 restore_system "system-90-bc250-audio-mode.lua" "/usr/local/share/wireplumber/scripts/90-bc250-audio-mode.lua"
 restore_system "system-alsa.lua" "/usr/local/share/wireplumber/scripts/monitors/alsa.lua"
 restore_system "system-bc250-eac3-backend" "/usr/local/libexec/bc250-eac3-backend"
+restore_system "system-bc250-pipe-size" "/usr/local/libexec/bc250-pipe-size"
 restore_system "system-bc250-eac3-backend.service" "/etc/systemd/user/bc250-eac3-backend.service"
 
 systemctl --user daemon-reload
