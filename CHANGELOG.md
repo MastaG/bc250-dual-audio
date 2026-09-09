@@ -6,6 +6,38 @@ Versions before v0.8 predate this file; v0.5-v0.7 built the native/AC-3
 arbitration, the configured-default authority, the hardware lock and reprobe
 logic, and the KDE monitor-stream guard that the current design still rests on.
 
+## v0.14
+
+Removes E-AC-3 entirely and raises AC-3 to its maximum bitrate.
+
+**E-AC-3 is gone.** Even after v0.13 cut its buffering from roughly 780 ms to a
+little over 170 ms, the path stayed audibly laggy in use, and the floor was
+structural: an encoder frame, a prebuffer, three kernel pipes and an ALSA buffer,
+all in an external process that WirePlumber could only coordinate with through a
+metadata handshake. AC-3 encodes inside PipeWire, reaches the same hardware, and
+at 640 kbit/s gives up little to a DD+ encoder that was in any case just the AC-3
+encoder emitting E-AC-3 syntax.
+
+Removed: the `bc250_eac3` sink, `bc250-eac3-backend` and its user service,
+`bc250-pipe-size`, the FIFO, the `bc250.eac3.*` permit/session handshake, and
+every E-AC-3 branch in the arbiter (which lost about 270 lines).
+
+- **AC-3 now defaults to 640 kbit/s**, up from 448. That is the top of the
+  codec's frame-size table. The encode is software and the DisplayPort link
+  carries it comfortably, so the lower default was not buying anything. Set it
+  back in `/etc/alsa/conf.d/61-bc250-a52.conf` if a receiver prefers 448.
+- Upgrades are handled rather than left behind: `install.sh` and the package's
+  post-install both disable and remove the old helper service, and a saved
+  default of `bc250_eac3` is migrated to `bc250_ac3` so nobody is left pointing
+  at a sink that no longer exists.
+- `ffmpeg`, `libpipewire-module-pipe-tunnel`, `python` and `util-linux` are no
+  longer required.
+- `check.sh` drops the E-AC-3 handshake and helper sections, and now reports the
+  configured AC-3 bitrate.
+
+`rollback.sh` is unchanged and still restores a pre-v0.14 system, E-AC-3
+included, from the snapshot `install.sh` takes.
+
 ## v0.13
 
 Cuts E-AC-3 latency and drops the bitrate from the sink names.

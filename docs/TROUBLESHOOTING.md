@@ -16,77 +16,21 @@ Background for the audio concepts used here is in
 
 ## First: is it broken, or is the sink incompatible?
 
-The two encoded modes fail differently, and the difference misleads people:
+A sink that cannot decode AC-3 usually plays the bitstream as **loud static** —
+it treats the compressed data as PCM. A sink that recognises the non-audio flag
+but has no decoder may instead **mute**. So noise doesn't prove the mode works,
+and silence doesn't prove it's broken.
 
-- **AC-3 on a sink that can't decode it** → loud static.
-- **E-AC-3 on a sink that can't decode it** → silence, because the stream is
-  correctly flagged as non-audio and the sink mutes rather than playing noise.
-
-So noise doesn't prove a mode works, and silence doesn't prove it's broken. The
-decisive check:
+The decisive check is what is actually being sent, not what you hear:
 
 ```bash
-journalctl --user -u bc250-eac3-backend | grep -i 'rate is not accurate'
+iecset -c 0 | grep -E 'Data|Rate'
 ```
 
 | Result | Meaning |
 |---|---|
-| Matches | The link can't carry the 192 kHz carrier DD+ needs. The sink or the adapter in front of it is the limit. No software setting fixes this. |
-| No match, pipeline running | The stream is going out correctly. If you hear nothing, the sink can't decode DD+. |
-
-Confirm what the link allows:
-
-```bash
-aplay -D hw:CARD=Generic,DEV=3 --dump-hw-params /dev/zero 2>&1 | grep -E '^RATE'
-```
-
-`RATE: [32000 48000]` means DD+ is impossible on that link. A DD+-capable chain
-offers 192000.
-
----
-
-## E-AC-3 mode is silent
-
-Work down this list.
-
-**1. Is the helper running?**
-
-```bash
-systemctl --user status bc250-eac3-backend.service
-```
-
-If it isn't, E-AC-3 can never produce output — the sink will still appear and
-accept audio, it just goes nowhere.
-
-```bash
-systemctl --user enable --now bc250-eac3-backend.service
-```
-
-**2. Did the handshake complete?** `check.sh` prints all three keys. With E-AC-3
-selected, all three should be `PRESENT`:
-
-```text
-bc250.eac3.permit    PRESENT
-bc250.eac3.session   PRESENT
-bc250.eac3.hardware  PRESENT
-```
-
-| Missing key | Meaning |
-|---|---|
-| All absent | WirePlumber never entered E-AC-3 mode — check its journal for the mode transition |
-| `session` absent | The helper never attached; check the service is running and the FIFO exists |
-| `permit` absent, `session` present | WirePlumber declined to commit — usually a transition cancelled midway |
-| `hardware` absent | The helper is attached but the encoder pipeline didn't start |
-
-**3. Did the encoder actually start?**
-
-```bash
-journalctl --user -u bc250-eac3-backend --since "10 min ago" | \
-  grep -E 'starting E-AC-3|permit observed|permit withdrawal'
-```
-
-**4. Is the carrier rate right?** See the section above. This is the most common
-cause by a wide margin.
+| `Data: non-audio` | The receiver is being told to decode this as Dolby. Correct. If you still hear nothing, the sink has no AC-3 decoder. |
+| `Data: audio` | The stream is going out flagged as PCM, which is what produces noise. See the static section below. |
 
 ---
 
@@ -161,7 +105,7 @@ cat /proc/asound/card0/pcm3p/sub0/hw_params   # rate/format/channels
 ```
 
 `owner_pid` resolves the question directly: PipeWire's own PID means native or
-AC-3, an `aplay` PID means E-AC-3.
+AC-3.
 
 ---
 
@@ -170,20 +114,19 @@ AC-3, an `aplay` PID means E-AC-3.
 Expect roughly 1–2 s: there's a deliberate 1000 ms hardware guard after the
 encoder releases the device, which exists to prevent `EBUSY`.
 
-Much longer than that, and the helper's release isn't being observed promptly:
+Much longer than that, and native HDMI is not suspending promptly — the arbiter
+polls for that before it will hand the device over:
 
 ```bash
-journalctl --user -u wireplumber | grep 'still waiting for EAC3 helper to release HDMI'
-journalctl --user -u bc250-eac3-backend | grep -E 'permit withdrawal event received|monitor exited'
+journalctl --user -u wireplumber | \
+  grep -E 'native HDMI is suspended|hardware guard|encoded hardware lock'
 ```
 
-Seeing `armed` but never `withdrawal event received` points at the metadata
-monitor rather than the handshake — the helper then falls back to detecting FIFO
-disappearance, which is correct but slow. Restart the service:
-
-```bash
-systemctl --user restart bc250-eac3-backend.service
-```
+If the "native HDMI is suspended" line is slow to appear, something is still
+holding the native sink open. A sink-monitor capture (a KDE or `pavucontrol`
+peak meter) is the usual culprit; the policy redirects those, but an application
+that opened one before WirePlumber applied the policy can keep it alive until it
+is closed.
 
 ---
 
@@ -249,7 +192,6 @@ For a bug report, this is the useful set:
   echo "=== link capabilities ==="
   aplay -D hw:CARD=Generic,DEV=3 --dump-hw-params /dev/zero 2>&1 | grep -E '^RATE|^CHANNELS|^FORMAT'
   echo "=== wireplumber ==="; journalctl --user -u wireplumber --since "20 min ago" --no-pager
-  echo "=== backend ==="; journalctl --user -u bc250-eac3-backend --since "20 min ago" --no-pager
 } >> /tmp/bc250-audio-report.txt
 ```
 

@@ -1,6 +1,6 @@
 # Architecture
 
-How the three outputs share one piece of hardware without colliding.
+How the two outputs share one piece of hardware without colliding.
 
 For the audio-format background this design rests on — IEC61937, carrier rates,
 the non-audio bit — see [AUDIO-BACKGROUND.md](AUDIO-BACKGROUND.md).
@@ -10,11 +10,10 @@ the non-audio bit — see [AUDIO-BACKGROUND.md](AUDIO-BACKGROUND.md).
 The BC-250 exposes **one** playback PCM for DisplayPort audio: `hw:Generic,3`
 (also reachable as `hdmi:CARD=Generic,DEV=0` — same device, different ALSA name).
 
-Three things want it:
+Two things want it:
 
 - the stock PipeWire ACP sink (native LPCM)
 - the ALSA `a52` plugin (AC-3)
-- `ffmpeg | aplay` inside the E-AC-3 helper
 
 ALSA gives it to exactly one of them. A second opener gets `EBUSY`. When that
 happens mid-switch the consequences are ugly: the native node enters ERROR,
@@ -24,7 +23,7 @@ something re-probes.
 So output selection is treated as a **global mode**, not a per-stream target:
 
 ```text
-native | ac3 | eac3
+native | ac3
 ```
 
 Every application stream — and every KDE/pavucontrol sink-monitor capture
@@ -40,21 +39,19 @@ one selected mode.
 ├─ monitors/alsa.lua ────────────────── patched stock ALSA monitor
 │    keeps native HDMI visible-but-suspended while an encoder owns the PCM
 │
-├─ 60-bc250-ac3-output.conf ─────────── the two virtual sinks (null-sinks)
+├─ 60-bc250-ac3-output.conf ─────────── the virtual sink (null-sink)
 ├─ 61-bc250-a52.conf ────────────────── the AC-3 encoder PCM
-├─ 50-bc250-audio.conf ──────────────── policy settings the arbiter reads
-│
-└─ bc250-eac3-backend(.service) ─────── the E-AC-3 encoder, a separate process
+└─ 50-bc250-audio.conf ──────────────── policy settings the arbiter reads
 ```
 
-The two encoded outputs are **null-sinks**: permanently present, always visible,
-and they never touch hardware themselves. A hidden backend is attached to
-whichever one is selected, and only then does anything open the PCM. That's why
-the sinks don't disappear when you switch away from them.
+The encoded output is a **null-sink**: permanently present, always visible, and
+it never touches hardware itself. A hidden backend is attached while it is
+selected, and only then does anything open the PCM. That's why the sink doesn't
+disappear when you switch away from it.
 
-Both encoded sinks run with `node.always-process = true`, so they keep producing
-encoded silence between application sounds. Receivers otherwise drop their Dolby
-lock in the gaps and clip the start of the next sound.
+It runs with `node.always-process = true`, so it keeps producing encoded silence
+between application sounds. Receivers otherwise drop their Dolby lock in the gaps
+and clip the start of the next sound.
 
 ## The AC-3 path
 
@@ -62,12 +59,13 @@ lock in the gaps and clip the start of the next sound.
 application 5.1 PCM
   → bc250_ac3              null-sink, visible in the UI
   → hidden A52 backend          created only while AC-3 is selected
-  → ALSA a52 plugin             encodes to AC-3 5.1 @ 448 kbps
+  → ALSA a52 plugin             encodes to AC-3 5.1 @ 640 kbps
   → hdmi:CARD=Generic,DEV=0     with IEC61937 channel status
 ```
 
 Encoding happens inside ALSA, in-process. There is no helper daemon, which is
-why AC-3 has always been the more robust of the two paths.
+why AC-3 was always the more robust of the two paths — and, in the end, why it
+is the only one left.
 
 The slave device carries explicit channel status
 (`AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02`). `AES0=0x06` sets the non-audio bit,
@@ -80,84 +78,30 @@ out flagged as ordinary PCM at a declared 44.1 kHz.
 `plug:bc250_a52_noaes` is the same encoder with no channel status, kept
 selectable for receivers that turn out to prefer the old behaviour.
 
-## The E-AC-3 path
+## Why there is no E-AC-3 path any more
 
-```text
-application 5.1 PCM
-  → bc250_eac3                       null-sink, visible in the UI
-  → hidden pipe-tunnel backend           writes PCM into a FIFO
-  → $XDG_RUNTIME_DIR/bc250-eac3.pcm
-  → bc250-eac3-backend.service           separate always-resident process
-  → ffmpeg -c:a eac3 -b:a 768k
-  → IEC61937 framing (-f spdif)
-  → aplay -c 2 -r 192000                 the 4× carrier DD+ requires
-  → hdmi:CARD=Generic,DEV=0,AES0=0x06
-```
+Up to v0.13 a second output encoded Dolby Digital Plus through an external
+process: a `pipe-tunnel` backend wrote PCM into a FIFO, an always-resident user
+service read it, and `ffmpeg -c:a eac3 | aplay -c 2 -r 192000` framed it as
+IEC61937 onto the same PCM.
 
-FFmpeg has no ALSA-plugin equivalent, so E-AC-3 needs an external process. That
-process is the source of every hard problem this project has had: it is not
-under WirePlumber's control, yet it holds the hardware.
+FFmpeg has no ALSA-plugin equivalent, so E-AC-3 needed an external process, and
+that process was the source of every hard problem this project had: it was not
+under WirePlumber's control, yet it held the hardware. Working around that took
+an explicit two-way handshake over `bc250.eac3.*` keys in PipeWire's `default`
+metadata — permit granted late, withdrawn early, release acknowledged rather
+than assumed — plus `setsid` process groups and a persistent
+`pw-metadata --monitor` per session.
 
-The helper is **always running** but blocks on the FIFO. It owns nothing until
-WirePlumber creates the pipe-tunnel backend and grants permission.
+It worked, but the latency never did. Every buffer in the chain filled at
+startup and nothing drained them again; v0.13 got it from roughly 780 ms down to
+a little over 170 ms by sizing each stage explicitly, and it was still audibly
+laggy. v0.14 removed the whole path — service, FIFO, helper binaries, permit
+handshake and the DD+ sink — leaving AC-3 at its 640 kbps ceiling, which reaches
+the same hardware in-process with none of the arbitration.
 
-## The ownership handshake
-
-Because the encoder is an independent process, WirePlumber cannot know when it
-has truly released the device. Guessing produced two distinct bugs: releasing too
-early gave `EBUSY`, waiting on indirect signals gave 8–9 second switches.
-
-The current design is an explicit two-way handshake over namespaced keys in
-PipeWire's `default` metadata object:
-
-| Key | Written by | Meaning |
-|---|---|---|
-| `bc250.eac3.permit` | WirePlumber | the transition is committed; you may open HDMI |
-| `bc250.eac3.session` | helper | attached; still holding, or acknowledging release |
-| `bc250.eac3.hardware` | helper | diagnostic: `ffmpeg`/`aplay` may own the device |
-
-```text
-WirePlumber                          bc250-eac3-backend
-───────────                          ──────────────────
-FIFO + bridge loaded, graph synced
-SESSION appears           ←───────── helper attached
-  │
-  ├─ publish PERMIT       ─────────→ metadata monitor sees "update"
-  │                                  ffmpeg/aplay open HDMI
-
-user leaves E-AC-3
-  │
-  ├─ delete PERMIT        ─────────→ metadata monitor sees "remove"
-  │                                  TERM the whole process group
-  │                                  wait until aplay is reaped
-  │                                  clear HARDWARE, then SESSION
-  │
-  ├─ wait for SESSION gone ←──────── release acknowledgement
-  ├─ 1000 ms hardware guard
-  └─ native / AC-3 / next owner may start
-```
-
-Three properties make this work:
-
-**The permit is granted late.** Only after the bridge is loaded, PipeWire has
-synced, *and* the requested generation is still current. A transition cancelled
-midway can therefore never cause a late hardware open.
-
-**The permit is withdrawn early** — before the graph is torn down, not after.
-
-**Release is acknowledged, not assumed.** `SESSION` is cleared only once the
-entire process group has been reaped, which is what actually proves `aplay`
-closed the ALSA device. WirePlumber waits for that. If it takes unusually long
-it logs a warning after 3 s and *keeps waiting* rather than letting another
-backend race the hardware — fail-safe, not fail-fast.
-
-The helper watches for withdrawal with one persistent `pw-metadata --monitor`
-process per session, attached via `coproc`, so teardown is event-driven. FIFO
-disappearance is retained as a secondary signal.
-
-The pipeline runs under `setsid` in its own process group, and the unit sets
-`KillMode=control-group`, so the feeder, FFmpeg and `aplay` are always stopped as
-one unit. Killing only the wrapper would leave `aplay` holding the device.
+If you need the history, it is in the v0.8–v0.13 entries of
+[CHANGELOG.md](../CHANGELOG.md).
 
 ## Native HDMI while an encoder owns the device
 
@@ -167,9 +111,8 @@ being allowed to open the hardware. Two mechanisms:
 - `node.suspend-on-idle = true` on the native node, so it releases the PCM
   promptly when nothing is linked to it.
 - The patched ALSA monitor honours an internal hardware lock
-  (`bc250.audio.ac3-hardware-lock`, named before E-AC-3 existed; it now means
-  *either* encoder owns or reserves the device). While set, the monitor defers
-  native re-creation and re-probing instead of racing.
+  (`bc250.audio.ac3-hardware-lock`). While set, the monitor defers native
+  re-creation and re-probing instead of racing.
 
 Hotplug and profile changes temporarily release the encoded owner, let ACP
 recreate and suspend native HDMI, then reclaim the encoded mode.
@@ -196,25 +139,18 @@ collides — so when packaged it goes to the normal `/usr/share` script director
 
 ## Reading a switch in the logs
 
-A healthy E-AC-3 → native handover, in order:
+A healthy AC-3 → native handover, in order:
 
 ```text
-wireplumber: EAC3 hardware permit withdrawn (EAC3 bridge teardown)
-wireplumber: unloading eac3 bridge
-backend:     EAC3 hardware permit withdrawal event received
-backend:     stopping E-AC-3 pipeline (EAC3 hardware permit withdrawn)
-backend:     hardware release acknowledged
-wireplumber: EAC3 helper release acknowledged (mode handover)
-wireplumber: starting 1000 ms hardware guard after release acknowledgement
+wireplumber: unloading ac3 bridge
+wireplumber: AC3 backend graph gone; starting 1000 ms hardware guard after release acknowledgement
 wireplumber: encoded hardware lock -> false
 wireplumber: native mode READY
 ```
 
-Follow both sides live:
+Follow it live:
 
 ```bash
 journalctl --user -u wireplumber -f | \
-  grep --line-buffered -E 'BC-250|AC3|EAC3|permit|SESSION|acknowledged|reprobe'
-
-journalctl --user -u bc250-eac3-backend -f
+  grep --line-buffered -E 'BC-250|AC3|encoded|reprobe'
 ```

@@ -14,8 +14,8 @@ electrically, like an ordinary stereo PCM stream.
 Everything downstream — the GPU, the cable, an adapter, the TV's input stage —
 handles it as if it were stereo PCM. Only the final decoder knows better.
 
-This is why `aplay` writes an E-AC-3 stream with `-f S16_LE -c 2`: those aren't
-audio parameters, they're the shape of the container.
+This is why an encoded stream is written as 16-bit stereo: those aren't audio
+parameters, they're the shape of the container.
 
 ## The non-audio bit
 
@@ -58,9 +58,10 @@ bit. They scan the incoming stream for the AC-3 sync word (`0x0B77`) and
 auto-switch when they see it. Strict sinks do honour it — notably TVs forwarding
 audio to a receiver over ARC, since the TV has to decide what to forward.
 
-## Carrier rates: why E-AC-3 needs 192 kHz
+## Carrier rates
 
-Different codecs need different amounts of room in the IEC61937 container:
+Different codecs need different amounts of room in the IEC61937 container. This
+project only ships AC-3 — the first row — but the second explains why:
 
 | Codec | Carrier | Available bandwidth | Codec ceiling |
 |---|---|---|---|
@@ -72,57 +73,36 @@ rate**. This is not optional and not a quality setting — it is how DD+ is fram
 
 The practical consequence: **a link that cannot do 192 kHz cannot carry DD+ at
 all**, regardless of software configuration. A stereo-only display whose ELD caps
-the PCM at 48 kHz will never work in E-AC-3 mode.
+the PCM at 48 kHz could never work in E-AC-3 mode. AC-3 has no such problem: its
+48 kHz carrier is what every one of these links already does.
 
-## The `aplay` rate trap
-
-This one is genuinely dangerous, because it fails *successfully*.
-
-Ask for a rate the hardware can't do and `aplay` does not error out:
-
-```text
-$ aplay -D hdmi:CARD=Generic,DEV=0,AES0=0x06 -t raw -f S16_LE -c 2 -r 192000 ...
-Playing raw data 'stdin' : Signed 16 bit Little Endian, Rate 192000 Hz, Stereo
-Warning: rate is not accurate (requested = 192000Hz, got = 48000Hz)
-$ echo $?
-0
-```
-
-It warns, runs at whatever the device allows, and exits 0. The pipeline looks
-completely healthy — `ffmpeg` keeps encoding, `aplay` keeps consuming, the
-process stays alive for hours — while the E-AC-3 bursts go out at a quarter of
-the rate they need. No receiver can decode that.
-
-`aplay -q` suppresses the warning, so a quiet pipeline hides the only evidence.
-That's why this project no longer uses `-q`.
-
-Check what a link actually supports:
+## Checking what a link actually supports
 
 ```bash
 aplay -D hw:CARD=Generic,DEV=3 --dump-hw-params /dev/zero 2>&1 | grep -E '^RATE|^CHANNELS'
 ```
 
-A stereo-only monitor reports something like `RATE: [32000 48000]`. A DD+-capable
-chain will offer 192000.
+A stereo-only monitor reports something like `RATE: [32000 48000]`, which is all
+AC-3 needs. A chain that also offers 192000 could have carried DD+.
 
 ## How to tell "broken" from "incompatible"
 
-The two encoded modes fail differently, which is confusing until you know why:
+A sink that cannot decode AC-3 typically plays the bitstream as **loud static**
+— it treats the compressed data as PCM. Before v0.12, which is when the
+non-audio bit started being set, that was the normal failure for any
+incompatible sink. With the bit set correctly, a sink that recognises
+"compressed, can't decode" may instead simply **mute**.
 
-| | Sink can't decode it | Why |
-|---|---|---|
-| **AC-3** | Loud static | Historically shipped without the non-audio bit, so the sink played it as PCM |
-| **E-AC-3** | Silence | Correctly flagged non-audio, so the sink recognises "compressed, can't decode" and mutes |
-
-So **noise is not proof that a mode is working**, and **silence is not proof that
-it's broken**. Use the logs, not your ears:
+So **noise is not proof that a mode is working**, and **silence is not proof
+that it's broken**. Check what is actually being sent rather than guessing from
+the sound:
 
 ```bash
-journalctl --user -u bc250-eac3-backend | grep -i 'rate is not accurate'
+iecset -c 0 | grep -E 'Data|Rate'
 ```
 
-Present → the link can't carry DD+. Absent, with the pipeline running → the
-stream is going out correctly and the sink simply can't decode it.
+`Data: non-audio` means the receiver is being told to decode it as Dolby, which
+is correct. `Data: audio` means it will be played as PCM — noise.
 
 ## ELD, and why this project ignores it
 
@@ -159,31 +139,27 @@ of metadata that may be fiction.
 
 ELD is still useful as *evidence* when troubleshooting — just not as a gate.
 
-## FFmpeg's E-AC-3 encoder
+## Bitrate
 
-Worth knowing what you're actually getting:
+**AC-3 @ 640 kbit/s** is the default and also the codec's ceiling — the top of
+its frame-size table. The encode is software and the DisplayPort link carries it
+comfortably, so there is nothing to save by going lower. 448 was the default
+before v0.14 and remains a valid setting if some receiver prefers it.
 
-- It is essentially **the AC-3 encoder emitting E-AC-3 syntax.** It does not
-  implement E-AC-3's efficiency tools such as spectral extension, so quality per
-  bit is close to AC-3 rather than meaningfully better.
-- **5.1 maximum.** No 7.1. This is why the project doesn't advertise it.
-- **No Atmos / JOC**, which would require joint object coding.
+### Why E-AC-3 was dropped
 
-The real advantage of the E-AC-3 path is therefore not efficiency — it's the
-**bitrate ceiling**. AC-3 stops at 640 kbit/s; E-AC-3 does not.
+v0.13 and earlier also offered Dolby Digital Plus. Its one real advantage was
+the bitrate ceiling: AC-3 stops at 640 kbit/s and E-AC-3 does not. That mattered
+less than it sounds, because FFmpeg's E-AC-3 encoder is essentially **the AC-3
+encoder emitting E-AC-3 syntax** — it implements none of E-AC-3's efficiency
+tools such as spectral extension, so quality per bit is close to AC-3 rather
+than meaningfully better. It is 5.1 maximum, with no Atmos or JOC.
 
-### Bitrate choices
-
-- **AC-3 @ 448 kbit/s** — the long-standing default. 640 is available if you want
-  AC-3's maximum.
-- **E-AC-3 @ 768 kbit/s** — above anything AC-3 can reach, and a common rate in
-  streaming DD+ content, so receivers are well exercised at it.
-
-Setting E-AC-3 to 640 would give you roughly max-bitrate AC-3 with extra decode
-complexity and no benefit — it discards the only advantage the path has. If you
-want to experiment, experiment *upward* (1024k, 1536k) on a direct HDMI run;
-there is ample room in a 6.144 Mbit/s carrier. ARC paths are less predictable at
-high rates.
+Against that, DD+ needed an external FFmpeg process behind a FIFO, a 192 kHz
+carrier that many links could not carry, and a permit handshake to stop it
+racing PipeWire for the one PCM. The latency it added was audible and never got
+below roughly 170 ms. Trading that for at most a marginal quality gain over
+640 kbit/s AC-3 was not worth it, so v0.14 removed the path.
 
 ## Useful commands
 
