@@ -11,7 +11,7 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP="$HOME/.local/state/bc250-audio-backup/$STAMP"
 mkdir -p "$BACKUP/user" "$BACKUP/system"
 
-echo "BC-250 Dual Audio v0.14 installer"
+echo "BC-250 Dual Audio v0.15 installer"
 echo "Native HDMI/DP + AC3 640 kbps"
 echo "Backup: $BACKUP"
 

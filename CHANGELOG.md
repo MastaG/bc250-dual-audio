@@ -6,6 +6,42 @@ Versions before v0.8 predate this file; v0.5-v0.7 built the native/AC-3
 arbitration, the configured-default authority, the hardware lock and reprobe
 logic, and the KDE monitor-stream guard that the current design still rests on.
 
+## v0.15
+
+Fixes audio disappearing after a screen wake or session switch on boards that
+never had an output explicitly selected.
+
+The arbiter takes its authority from `default.configured.audio.sink` when the
+user has picked an output. When nobody ever has, it followed WirePlumber's
+*effective* default instead -- and WirePlumber re-elects the freshly recreated
+native HDMI node on every reprobe (KDE screen wake, gamescope/KDE switch, TV
+power cycle) and falls back to the permanent `bc250_ac3` frontend whenever the
+native node vanishes. Neither is a user choice, but both were treated as one,
+so such a board oscillated: screen off -> AC-3 (backend built, applications
+routed to it), wake -> native (AC-3 bridge torn down mid-session, applications
+left on a sink with no backend). Seen on a BC-250 + LG G5: audio at boot, gone
+after the first KDE screen wake, `automatic/effective output -> …hdmi-stereo`
+in the journal at the exact moment.
+
+- The automatic choice is now **learned once, while the native node is
+  present, and held across native HDMI hotplug**. A re-election after the node
+  returns is logged as `automatic re-election … ignored; holding …` and has no
+  effect. While the node is absent, an encoded mode is simply kept (its
+  frontend is permanent); native mode still follows the fallback so streams
+  have a sink, and is restored when the node returns.
+- A sink that is not ours -- a USB DAC, a Bluetooth headset -- taking the
+  default is not churn and is still followed immediately; the learned BC-250
+  choice is kept for when that device goes away.
+- Picking an output explicitly (Steam, KDE, `wpctl set-default`) still takes
+  over immediately and persists, as before -- that remains the recommended way
+  to get AC-3 on purpose. `wpctl clear-default` re-enters automatic mode and
+  re-learns.
+
+Automatic mode is therefore deterministic now: it is what WirePlumber elects
+with the display present, normally the native sink. A board that happened to
+land on AC-3 by node-ordering luck will come up native instead; select
+`bc250_ac3` once to keep AC-3.
+
 ## v0.14
 
 Removes E-AC-3 entirely and raises AC-3 to its maximum bitrate.

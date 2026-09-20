@@ -114,6 +114,11 @@ being allowed to open the hardware. Two mechanisms:
   (`bc250.audio.ac3-hardware-lock`). While set, the monitor defers native
   re-creation and re-probing instead of racing.
 
+Authority for the mode is `default.configured.audio.sink` when the user has
+picked an output; otherwise the automatic choice is learned once while the
+native node is present and held across hotplug, because WirePlumber's
+effective-default re-elections on node churn are not user choices (v0.15).
+
 Hotplug and profile changes temporarily release the encoded owner, let ACP
 recreate and suspend native HDMI, then reclaim the encoded mode.
 

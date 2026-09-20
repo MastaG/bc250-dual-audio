@@ -32,6 +32,12 @@ Selecting one is just picking the output in Steam, KDE, `pavucontrol` or
 follows it. Per-app splits (Firefox on AC-3, Spotify on native) are deliberately
 prevented, because they'd mean two owners of one device.
 
+If you never pick one, the arbiter uses whatever WirePlumber elects while the
+display is present — normally the native sink — and **holds that across HDMI
+hotplug** (screen wake, session switch, TV power cycle). So AC-3 is something
+you choose once, not something that appears by accident; and once chosen it
+stays chosen.
+
 The native sink's channel count is whatever your display reports. This project
 never hard-codes it.
 
