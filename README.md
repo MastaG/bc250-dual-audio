@@ -3,7 +3,7 @@
 Real-time Dolby Digital output for the AMD BC-250, while leaving the normal
 HDMI/DisplayPort output completely untouched.
 
-Tested against **CachyOS / PipeWire 1.6.x / WirePlumber 0.5.17 / AMD BC-250**.
+Tested against **CachyOS / PipeWire 1.6.x / WirePlumber 0.5.18 / AMD BC-250**.
 
 ---
 
@@ -63,7 +63,7 @@ Mode.
 
 ### Requirements
 
-- WirePlumber **0.5.17** — the ALSA monitor override is rebased on this exact
+- WirePlumber **0.5.18** — the ALSA monitor override is rebased on this exact
   version and `install.sh` refuses to install onto an unknown base
 - `alsa-plugins` (the a52 encoder) and `alsa-utils` (`iecset`, for `check.sh`)
 
@@ -189,7 +189,7 @@ If you have used both methods on one machine, check for leftovers from the
 other.
 
 The patched `monitors/alsa.lua` is a downstream rebase of the stock WirePlumber
-0.5.17 script. It is installed under `/usr/local/share` so it shadows the stock
+0.5.18 script. It is installed under `/usr/local/share` so it shadows the stock
 copy by search-path precedence — the file owned by the `wireplumber` package is
 never modified. See [ARCHITECTURE.md](docs/ARCHITECTURE.md#why-usrlocalshare)
 for why it can't live anywhere else.

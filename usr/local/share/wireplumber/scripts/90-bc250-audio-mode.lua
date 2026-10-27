@@ -1,5 +1,5 @@
 -- BC-250 global native-HDMI / realtime Dolby encoder arbiter
--- Target: WirePlumber 0.5.17
+-- Target: WirePlumber 0.5.18
 -- BC-250 policy revision: v0.15
 --
 -- User-visible model:

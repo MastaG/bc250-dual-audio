@@ -6,6 +6,25 @@ Versions before v0.8 predate this file; v0.5-v0.7 built the native/AC-3
 arbitration, the configured-default authority, the hardware lock and reprobe
 logic, and the KDE monitor-stream guard that the current design still rests on.
 
+## v0.16
+
+Rebases the `monitors/alsa.lua` override onto stock WirePlumber **0.5.18**.
+
+The override shadows the stock script by name, so on a 0.5.18 system the
+0.5.17-based copy from v0.15 kept running in its place and hid every upstream
+change to the ALSA monitor. The BC-250 patch is carried over unchanged (a clean
+three-way merge; the only overlap was two neighbouring additions at the top of
+the file). What the board now gets from upstream:
+
+- Node error recovery is bounded: at most 3 profile Off/restore cycles per
+  device, reset after a minute without errors, and no overlapping recoveries.
+  0.5.17 cycled the profile on every node error, without a limit.
+- HDMI node descriptions include the product name from `hdmi.product.name`
+  (or `alsa.name`), and UCM HDMI nodes get their channel layout appended.
+
+`install.sh` now expects WirePlumber 0.5.18 and its stock `alsa.lua`
+(`b34959d3…`). The arbiter's policy is unchanged.
+
 ## v0.15
 
 Fixes audio disappearing after a screen wake or session switch on boards that

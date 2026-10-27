@@ -11,7 +11,7 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP="$HOME/.local/state/bc250-audio-backup/$STAMP"
 mkdir -p "$BACKUP/user" "$BACKUP/system"
 
-echo "BC-250 Dual Audio v0.15 installer"
+echo "BC-250 Dual Audio v0.16 installer"
 echo "Native HDMI/DP + AC3 640 kbps"
 echo "Backup: $BACKUP"
 
@@ -19,8 +19,8 @@ echo "Backup: $BACKUP"
 # Version / dependency gates
 # ---------------------------------------------------------------------------
 WP_VERSION=$(wireplumber --version 2>/dev/null | grep -Eo '0\.5\.[0-9]+' | head -1 || true)
-EXPECTED_WP_VERSION="0.5.17"
-EXPECTED_STOCK_ALSA_SHA256="b0f15addcd2b36a8a5cd87555b9cbd822de1b8663545e5add2faf3d2f4c50211"
+EXPECTED_WP_VERSION="0.5.18"
+EXPECTED_STOCK_ALSA_SHA256="b34959d3daaafb7fc82078cb6aa18a435a9ab28d4a6622f158ce89e10d2d8c67"
 STOCK_ALSA="/usr/share/wireplumber/scripts/monitors/alsa.lua"
 
 if [[ "$WP_VERSION" != "$EXPECTED_WP_VERSION" && "${BC250_ALLOW_UNTESTED_WP:-0}" != "1" ]]; then
@@ -33,7 +33,7 @@ fi
 if [[ -f "$STOCK_ALSA" && "${BC250_ALLOW_UNTESTED_WP:-0}" != "1" ]]; then
   STOCK_ALSA_SHA256=$(sha256sum "$STOCK_ALSA" | awk '{print $1}')
   if [[ "$STOCK_ALSA_SHA256" != "$EXPECTED_STOCK_ALSA_SHA256" ]]; then
-    echo "ERROR: distro stock alsa.lua does not match the WirePlumber 0.5.17 base used by v0.14." >&2
+    echo "ERROR: distro stock alsa.lua does not match the WirePlumber 0.5.18 base used by v0.16." >&2
     echo "Expected: $EXPECTED_STOCK_ALSA_SHA256" >&2
     echo "Found:    $STOCK_ALSA_SHA256" >&2
     echo "Refusing to install a full monitor shadow override onto an unknown base." >&2
