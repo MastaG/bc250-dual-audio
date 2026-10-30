@@ -6,6 +6,23 @@ Versions before v0.8 predate this file; v0.5-v0.7 built the native/AC-3
 arbitration, the configured-default authority, the hardware lock and reprobe
 logic, and the KDE monitor-stream guard that the current design still rests on.
 
+## v0.17
+
+Playback that asks for a sink of **another device** keeps it.
+
+The global-output hook redirected every application stream to the current
+native/AC-3 output, including one whose `target.object` names a different
+device. KytyPS5-Native plays a DualSense's haptics as a 4-channel stream on the
+controller's own USB audio sink; it ended up on HDMI, so the pad gave plain
+rumble at best. Such a sink cannot touch `hw:Generic,3`, so the EBUSY race the
+hook exists for does not arise: a playback stream whose target is an
+`Audio/Sink` other than `bc250_ac3` or a native HDMI node now links where it
+asked. Streams naming nothing, native HDMI or the AC-3 frontend follow the
+global choice as before, and sink-monitor captures are unchanged.
+
+Tested on a BC-250 with ASTRO BOT in KytyPS5-Native and a DualSense over USB:
+game audio on native HDMI, haptics on the controller.
+
 ## v0.16
 
 Rebases the `monitors/alsa.lua` override onto stock WirePlumber **0.5.18**.

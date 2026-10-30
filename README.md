@@ -30,7 +30,9 @@ disappearing sink, or silence).
 Selecting one is just picking the output in Steam, KDE, `pavucontrol` or
 `wpctl` — no special tooling. The choice is **global**: every application
 follows it. Per-app splits (Firefox on AC-3, Spotify on native) are deliberately
-prevented, because they'd mean two owners of one device.
+prevented, because they'd mean two owners of one device. A stream that asks for
+a sink of another device keeps it: a DualSense's own USB audio (its haptics),
+a USB headset. Those never touch the board's HDMI/DP device.
 
 If you never pick one, the arbiter uses whatever WirePlumber elects while the
 display is present — normally the native sink — and **holds that across HDMI

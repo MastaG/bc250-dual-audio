@@ -1,5 +1,5 @@
-e62ccdec1af4c9be82fe2df717f5a0e3584052b5da0070e9bf763faa42c1ac75  ./CHANGELOG.md
-0519cf156a4d79d2074f66aeb8ac60a1eb59a024f2faeaf161d20f1a7f857653  ./README.md
+15f036d406ae1f84c50194cfd6dd5daa6fd216f54af65b45713416070f914650  ./CHANGELOG.md
+20d507fcebab0d95d4b4c8577ba87aa36e929906d26c8bf1240e8ecd13653784  ./README.md
 54daf5045931fd92ad9f40d781d2edadb0c8193fee9e41aceab9a6f381c35cbc  ./check.sh
 4dc0eaa3560093b937ac7814d41f9159d665f0257135273b194b6b867f44a41e  ./docs/ARCHITECTURE.md
 2e2c40998b8a901cb3e89997bea9e95fb09b7674d2aac5d9631c51f11e8f96e3  ./docs/AUDIO-BACKGROUND.md
@@ -7,7 +7,7 @@ d785a419eca9ac15660a23655e07771206bb1da3608a7949376135233298e0e9  ./docs/TROUBLE
 c3c82e11a6a820bf953bbc755a410f59f57794805559a31de6f02c4b38e97e19  ./etc/alsa/conf.d/61-bc250-a52.conf
 362b7d9c66754ccc9cbddd72057e6708263daf0a944d0e14d8e9e33effd19f15  ./etc/pipewire/pipewire.conf.d/60-bc250-ac3-output.conf
 0ee0e72baf7c509fd939e8477d246bcab58bf2c4bfbf36ba2eb69992647db441  ./etc/wireplumber/wireplumber.conf.d/50-bc250-audio.conf
-8bfe7eb990ac3213fdb0693eb78fd7d1ecad18fb1778b5261227bb9334355b56  ./install.sh
+838be04018111023d53c77a05bbe91f28e6bd5de3627c0f207e3afb91324ccc3  ./install.sh
 f5ef4a7546c53781685e8c211f05e4802c993e01b085b9d70b21586c59b5a0cf  ./rollback.sh
-8fcd9b0a67740aaf86246556acd1a5a5b81b71bc0da8a2a4c41fe59a07b084db  ./usr/local/share/wireplumber/scripts/90-bc250-audio-mode.lua
+75e3c3f365026269788453dcb7c1f2eb2f566ab348d1125cd49cbb748ee8011b  ./usr/local/share/wireplumber/scripts/90-bc250-audio-mode.lua
 ac1725ef727445e0ce15f1bd4dad5d21063aad1d4ac51a214c756a3cec891229  ./usr/local/share/wireplumber/scripts/monitors/alsa.lua
